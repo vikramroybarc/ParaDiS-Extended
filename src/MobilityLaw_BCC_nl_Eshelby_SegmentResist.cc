@@ -1,17 +1,19 @@
 /**************************************************************************
  *
- *      Module:       MobilityLaw_BCC_nl_Eshelby_Resist.cc
- *      Description:  BCC_nl mobility with a binary nodal Eshelby
- *                    resistance.  Nodes outside all inclusions use the
- *                    original BCC_nl law.  For a node inside any inclusion,
- *                    MobEshelbyResist multiplies the complete BCC_nl drag.
+ *      Module:       MobilityLaw_BCC_nl_Eshelby_SegmentResist.cc
+ *      Description:  BCC_nl mobility with Eshelby resistance applied to
+ *                    the portions of dislocation segments intersecting
+ *                    Eshelby inclusions, using the same segment/intersection
+ *                    and nodal shape-function weighting as BCC_0_Eshelby.
+ *                    MobLine is intentionally not scaled, matching
+ *                    MobilityLaw_BCC_0_Eshelby.cc.
  *
  *      Includes public functions:
  *            InitMob_BCC_nl_Eshelby_Resist()
  *            Mobility_BCC_nl_Eshelby_Resist()
  *
  *     Includes private functions:
- *            NodeInsideEshelbyInclusion()
+ *            SegmentEshelbyFactor()
  *            EdgeDrag()
  *            JunctionDrag()
  *            ScrewDrag()
@@ -53,52 +55,131 @@ static real8 V0;
  *      Makes life much simpler.
  */
 #define MAX_NSCREW MAX_NBRS
+#define NUMLIMITS_MAX (2*MAX_SEGPART_INTERSECTIONS+1)
 
 
 /*
- *      Return 1 when the node lies in any local or ghost Eshelby inclusion.
- *      Membership is evaluated in the simulation frame using the same
- *      ellipsoid-to-unit-sphere transform as IntersectionEllipseSegment().
+ *      Return the nodal shape-function weight of the portion of the segment
+ *      (node,nbrNode) lying inside the union of all intersected Eshelby
+ *      inclusions.  This is the same weighting used by BCC_0_Eshelby:
+ *
+ *          factor = sum [ (1-lambda0)^2 - (1-lambda1)^2 ]
+ *
+ *      where lambda=0 is the current node and lambda=1 is the neighbor.
  */
-static int NodeInsideEshelbyInclusion(Home_t *home, Node_t *node)
+static real8 SegmentEshelbyFactor(Home_t *home, Node_t *node, Node_t *nbrNode)
 {
-        int      i;
-        Param_t *param;
+        int                 iCnt, j, numLimits;
+        real8               factor;
+        real8               pos1[3], pos2[3];
+        real8               ratioList[2][NUMLIMITS_MAX];
+        Param_t            *param;
+        SegPartIntersect_t *intersection;
 
         param = home->param;
 
         if ((!param->enableInclusions) ||
-            (home->eshelbyInclusions == (EInclusion_t *)NULL)) {
-            return(0);
+            (param->MobEshelbyResist == 1.0)) {
+            return(0.0);
         }
 
-        for (i = 0; i < home->totInclusionCount; i++) {
-            real8 chi, d[3], normal[3], q0, q1, q2;
+        intersection = SegPartListLookup(home, &node->myTag, &nbrNode->myTag);
+
+        if (intersection == (SegPartIntersect_t *)NULL) {
+            return(0.0);
+        }
+
+        pos1[X] = node->x;
+        pos1[Y] = node->y;
+        pos1[Z] = node->z;
+
+        pos2[X] = nbrNode->x - node->x;
+        pos2[Y] = nbrNode->y - node->y;
+        pos2[Z] = nbrNode->z - node->z;
+        ZImage(param, &pos2[X], &pos2[Y], &pos2[Z]);
+        pos2[X] += pos1[X];
+        pos2[Y] += pos1[Y];
+        pos2[Z] += pos1[Z];
+
+        numLimits = 0;
+
+        for (iCnt = 0; iCnt < intersection->numIntersections; iCnt++) {
+            int           k, ninc, newRegion;
+            real8         dx, dy, dz, ratio[2], partPos[3];
             EInclusion_t *inclusion;
 
-            inclusion = &home->eshelbyInclusions[i];
+            inclusion = &home->eshelbyInclusions[intersection->inclusionIndex[iCnt]];
 
-            d[X] = node->x - inclusion->position[X];
-            d[Y] = node->y - inclusion->position[Y];
-            d[Z] = node->z - inclusion->position[Z];
-            ZImage(param, &d[X], &d[Y], &d[Z]);
+            dx = inclusion->position[X] - pos1[X];
+            dy = inclusion->position[Y] - pos1[Y];
+            dz = inclusion->position[Z] - pos1[Z];
+            ZImage(param, &dx, &dy, &dz);
 
-            NormalizedCrossVector(inclusion->rotation[0],
-                                  inclusion->rotation[1], normal);
+            partPos[X] = pos1[X] + dx;
+            partPos[Y] = pos1[Y] + dy;
+            partPos[Z] = pos1[Z] + dz;
 
-            q0 = DotProduct(inclusion->rotation[0], d) /
-                 inclusion->radius[0];
-            q1 = DotProduct(inclusion->rotation[1], d) /
-                 inclusion->radius[1];
-            q2 = DotProduct(normal, d) / inclusion->radius[2];
-            chi = q0*q0 + q1*q1 + q2*q2;
+            if (!IntersectionEllipseSegment(partPos, inclusion->radius,
+                                            inclusion->rotation, pos1, pos2,
+                                            1.0, &ninc, ratio)) {
+                continue;
+            }
 
-            if (chi <= (1.0 + 1.0e-12)) {
-                return(1);
+            ratio[0] = MIN(1.0, MAX(ratio[0], 0.0));
+            ratio[1] = MIN(1.0, MAX(ratio[1], 0.0));
+
+            if (ratio[1] < ratio[0]) {
+                real8 tmpRatio = ratio[0];
+                ratio[0] = ratio[1];
+                ratio[1] = tmpRatio;
+            }
+
+            if (numLimits == 0) {
+                ratioList[0][0] = ratio[0];
+                ratioList[1][0] = ratio[1];
+                numLimits = 1;
+            } else {
+                newRegion = 1;
+
+                /* Merge this interval with every overlapping interval. */
+                for (k = 0; k < numLimits; ) {
+                    if ((ratio[1] < ratioList[0][k]) ||
+                        (ratio[0] > ratioList[1][k])) {
+                        k++;
+                        continue;
+                    }
+
+                    ratio[0] = MIN(ratio[0], ratioList[0][k]);
+                    ratio[1] = MAX(ratio[1], ratioList[1][k]);
+
+                    for (j = k; j < numLimits-1; j++) {
+                        ratioList[0][j] = ratioList[0][j+1];
+                        ratioList[1][j] = ratioList[1][j+1];
+                    }
+                    numLimits--;
+                    newRegion = 1;
+                }
+
+                if (newRegion) {
+                    if (numLimits >= NUMLIMITS_MAX) {
+                        Fatal("SegmentEshelbyFactor: numLimits (%d) exceeds max of %d",
+                              numLimits, NUMLIMITS_MAX);
+                    }
+                    ratioList[0][numLimits] = ratio[0];
+                    ratioList[1][numLimits] = ratio[1];
+                    numLimits++;
+                }
             }
         }
 
-        return(0);
+        factor = 0.0;
+
+        for (j = 0; j < numLimits; j++) {
+            factor += (1.0-ratioList[0][j]) * (1.0-ratioList[0][j]) -
+                      (1.0-ratioList[1][j]) * (1.0-ratioList[1][j]);
+        }
+
+        return(MIN(1.0, MAX(0.0, factor)));
 }
 
 
@@ -385,7 +466,8 @@ static void fscale(Param_t *param, real8 vin, real8 burg[3],
  *    finit:  Initial guess... updated before return to caller.
  */
 static void ScrewDrag(Param_t *param, real8 finit[3], real8 vel[3],
-                      real8 burg[3], real8 dfsdragdv[3][3])
+                      real8 burg[3], real8 glideScale,
+                      real8 dfsdragdv[3][3])
 {
         int   i, m, n;
         real8 eps;
@@ -442,6 +524,10 @@ static void ScrewDrag(Param_t *param, real8 finit[3], real8 vel[3],
         }
 
         fscale(param, vMag, burg, &fout, &dfdv);
+
+        /* Match BCC_0_Eshelby: scale screw glide resistance, but not line drag. */
+        fout *= glideScale;
+        dfdv *= glideScale;
 
         for (m = 0; m < 3; m++) {
             for (n = 0; n < 3; n++) {
@@ -507,14 +593,15 @@ int Mobility_BCC_nl_Eshelby_Resist(Home_t *home, Node_t *node,
         real8   normerrortol, normerror, vline;
         real8   Beclimb, Beline, Beglide;
         real8   eps, rt2, burgProd, mag, avgFactor, correctionAdjustment;
-        real8   dragScale;
         real8   vtest[3], fn[3], rt[3], zero3[3], tmp3[3], ferror[3];
         real8   dfsdv[3][3], dferrordv[3][3];
         real8   dflindv[3][3], dfedragdv[3][3], dfjdragdv[3][3];
         real8   dferrordvold[3][3]; 
         real8   LTotal[MAX_NBRS], LScrew[MAX_NBRS], LEdge[MAX_NBRS], L2;
+        real8   eshelbyFactor[MAX_NBRS];
         real8   linedir[MAX_NBRS][3], ndir[MAX_NBRS][3], burg[MAX_NBRS][3];
         real8   screwb[MAX_NSCREW][3], dfndfscrew[MAX_NSCREW];
+        real8   dfndfscrewGlide[MAX_NSCREW], screwGlideScale[MAX_NSCREW];
         real8   fscrew[MAX_NSCREW][3];
         real8   tmp, scalar, vdirNorm, vtestNorm, screwNorm;
         real8   rhs[2], tmp2[2], tmp22[2][2], tmp22Inv[2][2];
@@ -550,7 +637,6 @@ int Mobility_BCC_nl_Eshelby_Resist(Home_t *home, Node_t *node,
         maxIter = 50;
         maxIter2 = 100;
         isJunction = 0;
-        dragScale = 1.0;
 
 #if 0
 /*
@@ -583,15 +669,6 @@ int Mobility_BCC_nl_Eshelby_Resist(Home_t *home, Node_t *node,
             node->vY = 0.0;
             node->vZ = 0.0;
             return(0);
-        }
-
-/*
- *      MobEshelbyResist is a drag multiplier, not an absolute mobility.
- *      The membership test is binary and based only on the node position.
- */
-        if ((param->MobEshelbyResist != 1.0) &&
-            NodeInsideEshelbyInclusion(home, node)) {
-            dragScale = param->MobEshelbyResist;
         }
 
         numNbrs = node->numNbrs;
@@ -680,6 +757,9 @@ int Mobility_BCC_nl_Eshelby_Resist(Home_t *home, Node_t *node,
                 numNonZeroLenSegs++;
             }
 
+            /* Same segment/intersection weighting used by BCC_0_Eshelby. */
+            eshelbyFactor[i] = SegmentEshelbyFactor(home, node, nbrNode);
+
             burg[i][0] = node->burgX[iAll];
             burg[i][1] = node->burgY[iAll];
             burg[i][2] = node->burgZ[iAll];
@@ -762,6 +842,8 @@ int Mobility_BCC_nl_Eshelby_Resist(Home_t *home, Node_t *node,
         memset(dflindv, 0, sizeof(dflindv));
 
         for (i = 0, iAll = 0; iAll < numNbrs; i++, iAll++) {
+            real8 factor;
+            real8 dfdragAlt[3][3];
 
 /*
  *          Skip any zero length segments...
@@ -771,22 +853,46 @@ int Mobility_BCC_nl_Eshelby_Resist(Home_t *home, Node_t *node,
                 continue;
             }
 
+            factor = eshelbyFactor[i];
             burgProd = burg[i][0] * burg[i][1] * burg[i][2];
 
             if (fabs(burgProd) < eps) {
                 JunctionDrag(Beclimb, Beline, zero3, burg[i], linedir[i],
-                                 /* fjdrag,*/ dfjdragdv);
+                             /* fjdrag,*/ dfjdragdv);
+
+                if (factor > 0.0) {
+                    JunctionDrag(param->MobEshelbyResist*Beclimb, Beline,
+                                 zero3, burg[i], linedir[i], dfdragAlt);
+                }
+
                 for (m = 0; m < 3; m++) {
                     for (n = 0; n < 3; n++) {
-                        dflindv[m][n] += (0.5 * LTotal[i]) * dfjdragdv[m][n];
+                        real8 Beff = dfjdragdv[m][n];
+                        if (factor > 0.0) {
+                            Beff = (1.0-factor)*dfjdragdv[m][n] +
+                                   factor*dfdragAlt[m][n];
+                        }
+                        dflindv[m][n] += (0.5 * LTotal[i]) * Beff;
                     }
                 }
             } else if (edgeExists[i]) {
                 EdgeDrag(Beglide, Beclimb, Beline, zero3, burg[i],
                          ndir[i], /* fedrag,*/ dfedragdv);
+
+                if (factor > 0.0) {
+                    EdgeDrag(param->MobEshelbyResist*Beglide,
+                             param->MobEshelbyResist*Beclimb,
+                             Beline, zero3, burg[i], ndir[i], dfdragAlt);
+                }
+
                 for (m = 0; m < 3; m++) {
                     for (n = 0; n < 3; n++) {
-                        dflindv[m][n] += (0.5 * LEdge[i]) * dfedragdv[m][n];
+                        real8 Beff = dfedragdv[m][n];
+                        if (factor > 0.0) {
+                            Beff = (1.0-factor)*dfedragdv[m][n] +
+                                   factor*dfdragAlt[m][n];
+                        }
+                        dflindv[m][n] += (0.5 * LEdge[i]) * Beff;
                     }
                 }
             }
@@ -824,28 +930,28 @@ int Mobility_BCC_nl_Eshelby_Resist(Home_t *home, Node_t *node,
                         screwb[numscrews][1] = burg[i][1];
                         screwb[numscrews][2] = burg[i][2];
                         dfndfscrew[numscrews] = 0.5*LScrew[i];
+                        dfndfscrewGlide[numscrews] = 0.5*LScrew[i] *
+                            (1.0 + (param->MobEshelbyResist-1.0)*eshelbyFactor[i]);
                         numscrews++;
                     } else {
                         dfndfscrew[thisScrew] += 0.5*LScrew[i];
+                        dfndfscrewGlide[thisScrew] += 0.5*LScrew[i] *
+                            (1.0 + (param->MobEshelbyResist-1.0)*eshelbyFactor[i]);
                     }
                 }
             }
         }
 
 /*
- *      Scale the complete BCC_nl resistance exactly once.  Scaling the
- *      assembled linear matrix and screw-family coefficients also scales
- *      the Newton Jacobian and the one-screw line solve consistently.
+ *      Convert each screw family's segment-weighted nonlinear glide length
+ *      to a scale factor.  The geometric half-length dfndfscrew[] remains
+ *      unscaled so the MobLine contribution is unchanged, as in BCC_0_Eshelby.
  */
-        if (dragScale != 1.0) {
-            for (m = 0; m < 3; m++) {
-                for (n = 0; n < 3; n++) {
-                    dflindv[m][n] *= dragScale;
-                }
-            }
-
-            for (i = 0; i < numscrews; i++) {
-                dfndfscrew[i] *= dragScale;
+        for (i = 0; i < numscrews; i++) {
+            if (dfndfscrew[i] > 0.0) {
+                screwGlideScale[i] = dfndfscrewGlide[i] / dfndfscrew[i];
+            } else {
+                screwGlideScale[i] = 1.0;
             }
         }
 
@@ -923,7 +1029,8 @@ int Mobility_BCC_nl_Eshelby_Resist(Home_t *home, Node_t *node,
             }
 
             for (i = 0; i < numscrews; i++) {
-                ScrewDrag(param, fscrew[i], vtest, screwb[i], dfsdv);
+                ScrewDrag(param, fscrew[i], vtest, screwb[i],
+                          screwGlideScale[i], dfsdv);
                 for (m = 0; m < 3; m++) {
                     ferror[m] -= dfndfscrew[i] * fscrew[i][m];
                     for (n = 0; n < 3; n++) {

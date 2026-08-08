@@ -55,7 +55,6 @@ typedef enum {
         MOB_BCC_NL,
 #ifdef ESHELBY
         MOB_BCC_NL_ESHELBY,
-        MOB_BCC_NL_ESHELBY_RESIST,
 #endif
         MOB_BCC_TA_NL,
         MOB_BCC_TA_NL_B,
@@ -137,7 +136,6 @@ void  InitMob_BCC_faceted                (Home_t *home);
 void  InitMob_BCC_nl                     (Home_t *home);
 #ifdef ESHELBY
 void  InitMob_BCC_nl_Eshelby             (Home_t *home);
-void  InitMob_BCC_nl_Eshelby_Resist      (Home_t *home);
 #endif
 void  InitMob_BCC_Ta_nl                  (Home_t *home);
 void  InitMob_BCC_Ta_nl_b                (Home_t *home);
@@ -232,7 +230,6 @@ void  FindGlidePlaneFCC   (Home_t *home, int bIndex, real8 plane[3], int *pIndex
 int   Mobility_BCC_0_Eshelby      (Home_t *home, Node_t *node, MobArgs_t *mobArgs);
 int   Mobility_BCC_0b_Eshelby     (Home_t *home, Node_t *node, MobArgs_t *mobArgs);
 int   Mobility_BCC_nl_Eshelby     (Home_t *home, Node_t *node, MobArgs_t *mobArgs);
-int   Mobility_BCC_nl_Eshelby_Resist(Home_t *home, Node_t *node, MobArgs_t *mobArgs);
 int   Mobility_FCC_0b_Eshelby     (Home_t *home, Node_t *node, MobArgs_t *mobArgs);
 int   Mobility_BCC_linear_Eshelby (Home_t *home, Node_t *node, MobArgs_t *mobArgs);
 int   Mobility_FCC_linear_Eshelby (Home_t *home, Node_t *node, MobArgs_t *mobArgs);
@@ -458,17 +455,6 @@ const MobAttr_t mobAttrList[MOB_MAX_INDEX] =
               NO_CROSS_SLIP,
               InitMob_BCC_nl_Eshelby,
               Mobility_BCC_nl_Eshelby
-            },
-
-            {"BCC_nl_Eshelby_Resist",
-              MAT_TYPE_BCC,
-              MOB_BCC_NL_ESHELBY_RESIST,
-              WARN_ON_MAT_TYPE_MISMATCH,
-              NON_PLANAR,
-              NO_FUZZY_PLANES,
-              NO_CROSS_SLIP,
-              InitMob_BCC_nl_Eshelby_Resist,
-              Mobility_BCC_nl_Eshelby_Resist
             },
 #endif
 

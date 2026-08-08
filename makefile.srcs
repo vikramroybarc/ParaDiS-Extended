@@ -141,7 +141,6 @@ PARADIS_OBJS = \
    $(OBJDIR)/MobilityLaw_BCC_linear_Eshelby.o          \
    $(OBJDIR)/MobilityLaw_BCC_nl.o                      \
    $(OBJDIR)/MobilityLaw_BCC_nl_Eshelby.o              \
-   $(OBJDIR)/MobilityLaw_BCC_nl_Eshelby_Resist.o       \
    $(OBJDIR)/MobilityLaw_FCC_0.o                       \
    $(OBJDIR)/MobilityLaw_FCC_0b.o                      \
    $(OBJDIR)/MobilityLaw_FCC_0b_Eshelby.o              \
