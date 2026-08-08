@@ -1,0 +1,403 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,mathtools,bm}
+\usepackage{booktabs,tabularx,array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!55!black,
+  urlcolor=blue!55!black,
+  pdftitle={BCC nl Eshelby Nodal Resistance Mobility Law}
+}
+
+\setcounter{tocdepth}{2}
+\setlist{nosep,leftmargin=*}
+\allowdisplaybreaks
+
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{P}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcommand{\vect}[1]{\bm{#1}}
+\newcommand{\norm}[1]{\left\lVert #1\right\rVert}
+\newcommand{\abs}[1]{\left\lvert #1\right\rvert}
+\newcommand{\dyad}[2]{#1\!\otimes\!#2}
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+
+\title{The \texttt{BCC\_nl\_Eshelby\_Resist} Mobility Law\\
+       Binary Nodal Resistance Inside Eshelby Inclusions}
+\author{KGParadis source-level technical documentation}
+\date{Code snapshot reviewed 7 August 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+The mobility selector \code{BCC_nl_Eshelby_Resist} preserves the original BCC
+nonlinear constitutive law outside Eshelby inclusions.  When the dislocation
+node itself lies inside any periodic ellipsoidal inclusion, the dimensionless
+parameter \code{MobEshelbyResist} multiplies the complete BCC nonlinear
+resistance, including both force and Jacobian terms.  This document derives
+the binary point test, resistance-scaled force balance, Newton matrix, limiting
+cases, source integration, and required control-file input.  The implementation
+is a complete standalone source file; neither \path{MobilityLaw_BCC_nl.cc} nor
+the existing arm-fraction \code{BCC_nl_Eshelby} law is changed.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Selector and implementation files}
+
+The control-file selector is
+\begin{center}
+\code{mobilityLaw = "BCC_nl_Eshelby_Resist"}.
+\end{center}
+Its independent entry points are
+\begin{align*}
+ &\code{InitMob_BCC_nl_Eshelby_Resist(Home_t *)},\\
+ &\code{Mobility_BCC_nl_Eshelby_Resist(Home_t *,Node_t *,MobArgs_t *)}.
+\end{align*}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}P{0.43\textwidth}Y@{}}
+\toprule
+File & Responsibility \\
+\midrule
+\path{src/MobilityLaw_BCC_nl_Eshelby_Resist.cc} &
+  Complete BCC nonlinear solver, binary ellipsoid membership test, and
+  resistance scaling. \\
+\path{include/Mobility.h} &
+  Guarded enum, prototypes, and selector registration. \\
+\path{src/DisableUnneededParams.cc} &
+  Preserves BCC nonlinear parameters, pressure, inclusion file, and
+  \code{MobEshelbyResist} in restart output. \\
+\path{makefile.srcs} and \path{src/makefile.dep} &
+  Object registration and dependency closure. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The implementation is enclosed by \code{ESHELBY}.  Without that build flag the
+translation unit is empty and the selector is not registered.
+
+\section{Binary node membership}
+
+\subsection{Periodic ellipsoid equation}
+
+Let the node position be \(\vect{x}\).  Inclusion \(p\) has center
+\(\vect{C}_p\), positive semi-axes \(a_{p0},a_{p1},a_{p2}\), and principal
+directions \(\vect{e}_{p0},\vect{e}_{p1}\).  The third direction is
+\begin{equation}
+ \vect{e}_{p2}=
+ \frac{\vect{e}_{p0}\times\vect{e}_{p1}}
+      {\norm{\vect{e}_{p0}\times\vect{e}_{p1}}}.
+\end{equation}
+The source first applies the ParaDiS minimum-image operation,
+\begin{equation}
+ \vect{d}_p=\operatorname{ZImage}(\vect{x}-\vect{C}_p),
+ \label{eq:zimage}
+\end{equation}
+then evaluates the squared unit-sphere coordinate
+\begin{equation}
+ \chi_p(\vect{x})=
+ \sum_{k=0}^{2}
+ \left(\frac{\vect{e}_{pk}\mathbin{\cdot}\vect{d}_p}{a_{pk}}\right)^2.
+ \label{eq:chi}
+\end{equation}
+This is the same ellipsoid-to-sphere transform used by
+\path{src/SegPartIntersect.cc}.
+
+The binary indicator is
+\begin{equation}
+ \boxed{
+ I(\vect{x})=
+ \begin{cases}
+  1,&\min_p\chi_p(\vect{x})\leq1+10^{-12},\\
+  0,&\text{otherwise}.
+ \end{cases}}
+ \label{eq:indicator}
+\end{equation}
+The tolerance classifies a node on the particle boundary as inside.  Locally
+owned and ghost inclusions are both scanned through
+\begin{center}
+\code{home->totInclusionCount}.
+\end{center}
+Overlapping particles do not compound the resistance: membership in any one
+particle sets \(I=1\).
+
+\subsection{Why this is a node test}
+
+This law deliberately does not use segment--particle intersection lengths.
+A node inside a particle is scaled even if its connected arms immediately
+leave the particle.  Conversely, a node outside remains on ordinary BCC
+nonlinear mobility even when one of its arms crosses a particle.
+
+This differs from \code{BCC_nl_Eshelby}, which computes an endpoint-weighted
+covered fraction for every arm and uses a BCC\_0 tensor on covered portions.
+The two selectors implement different physical models and coexist.
+
+\section{Outside constitutive law: BCC nonlinear mobility}
+
+\subsection{Thermally activated screw relation}
+
+The standalone file contains its own copy of the original BCC nonlinear
+helpers and initializer.  Define
+\[
+ p=\code{MobExpP},\qquad q=\code{MobExpQ},\qquad
+ \alpha_0=\code{MobAlpha},\qquad
+ H=\frac{\code{MobDeltaH0}}{k_BT},
+\]
+and \(P_{\rm GPa}=P/10^9\).  Initialization computes
+\begin{align}
+ \mathcal L
+ &=A C_0\left(1-C\frac{T}{T_m}+D P_{\rm GPa}\right),
+ \label{eq:L}\\
+ y&=\alpha_0^p,\nonumber\\
+ \mathcal N
+ &=\frac{\mathcal L}
+ {\exp[-H(1-y)^q]\,[1+pqH(1-y)^{q-1}y]},
+ \label{eq:N}\\
+ V_0
+ &=\alpha_0\mathcal L
+   -\alpha_0\mathcal N\exp[-H(1-y)^q].
+ \label{eq:V0}
+\end{align}
+Here \(A,C_0,C,D,T_m\) correspond to \code{MobCoeffA},
+\code{MobCoeffC0}, \code{MobCoeffC}, \code{MobCoeffD}, and
+\code{meltTemp}.
+
+For a screw Burgers family, let
+\begin{equation}
+ M_L=\frac{\mathcal L}{b_{\rm mag}},\qquad
+ M_N=\frac{\mathcal N}{b_{\rm mag}},\qquad
+ v_0=\frac{V_0}{b_{\rm mag}},
+\end{equation}
+\begin{equation}
+ f_P=\code{MobPeierls}\,\norm{\vect b},\qquad
+ \omega=\frac{M_N}{f_P},\qquad
+ v_{\rm tr}=\alpha_0M_L-v_0.
+\end{equation}
+Below the transition, the scalar screw glide force is the numerical inverse of
+\begin{equation}
+ \boxed{
+ v=\omega f\,
+ \exp\left[-H\left(1-(f/f_P)^p\right)^q\right],
+ \qquad 0\leq v<v_{\rm tr}.}
+ \label{eq:thermal}
+\end{equation}
+Above the transition the continuation is
+\begin{equation}
+ f(v)=\frac{(v+v_0)f_P}{M_L}.
+ \label{eq:linear-continuation}
+\end{equation}
+
+\subsection{Nodal BCC nonlinear resistance}
+
+For arm \(i\), let \(L_i\) be its length, \(\vect{t}_i\) its unit tangent,
+and \(\vect b_i\) its Burgers vector.  Its projected lengths are
+\begin{equation}
+ L_{s,i}=\frac{\abs{\vect r_i\mathbin{\cdot}\vect b_i}}
+                     {\norm{\vect b_i}},
+ \qquad
+ L_{e,i}=\sqrt{\max(0,L_i^2-L_{s,i}^2)}.
+\end{equation}
+
+The source groups collinear screw Burgers vectors.  Its complete unscaled
+nodal resistance may be written
+\begin{equation}
+ \boxed{
+ \mathcal R_{\rm nl}(\vect v)
+ =D_{\rm lin}\vect v+
+  \sum_g C_g\,\vect F_{s,g}(\vect v),}
+ \label{eq:base-resistance}
+\end{equation}
+where
+\begin{equation}
+ C_g=\frac12\sum_{i\in g}L_{s,i}.
+\end{equation}
+\(D_{\rm lin}\) contains the \(L_e/2\) edge tensors and \(L/2\) junction
+tensors.  The nonlinear screw force \(\vect F_{s,g}\) contains the scalar law
+in Equations~\eqref{eq:thermal}--\eqref{eq:linear-continuation} in the plane
+normal to \(\vect b_g\), plus line drag along \(\vect b_g\).
+
+\section{Inside resistance multiplier}
+
+Let
+\begin{equation}
+ \alpha=\code{MobEshelbyResist}>0
+\end{equation}
+and define the nodal scale
+\begin{equation}
+ \boxed{\beta(\vect{x})=1+(\alpha-1)I(\vect{x}).}
+ \label{eq:beta}
+\end{equation}
+Thus \(\beta=1\) outside and \(\beta=\alpha\) inside.  The new nodal force
+balance is
+\begin{equation}
+ \boxed{
+ \vect r(\vect v)=
+ \vect F_{\rm node}-\beta\mathcal R_{\rm nl}(\vect v)=\vect0.}
+ \label{eq:residual}
+\end{equation}
+Its Newton Jacobian is
+\begin{equation}
+ \boxed{
+ J(\vect v)=
+ -\beta\left[
+ D_{\rm lin}+
+ \sum_g C_g\frac{\partial\vect F_{s,g}}{\partial\vect v}
+ \right].}
+ \label{eq:jacobian}
+\end{equation}
+
+The source assembles ordinary BCC\_nl first.  Immediately before the
+one-screw shortcut and Newton loop, it multiplies every component of
+\code{dflindv} and every populated \code{dfndfscrew[g]} by \(\beta\).  This
+scales linear edge/junction drag, nonlinear screw force, derivative, line
+solve, and returned inverse Jacobian exactly once.
+
+Equation~\eqref{eq:residual} also gives the useful identity
+\begin{equation}
+ \boxed{
+ \vect r_\alpha(\vect v;\vect F)
+ =\alpha\,\vect r_1(\vect v;\vect F/\alpha)
+ \quad\text{for an inside node}.}
+ \label{eq:force-equivalence}
+\end{equation}
+Therefore the inside solution is ordinary BCC\_nl evaluated at an effective
+force \(\vect F/\alpha\); no new screw interpolation is introduced.
+
+\section{Interpretation and limits}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}P{0.28\textwidth}Y@{}}
+\toprule
+Condition & Result \\
+\midrule
+\(I=0\) & Exact original BCC\_nl execution and algebra. \\
+\(I=1,\ \alpha=1\) & Exact original BCC\_nl despite being inside. \\
+\(I=1,\ \alpha>1\) & Increased resistance and reduced mobility. \\
+\(I=1,\ 0<\alpha<1\) & Reduced resistance and increased mobility. \\
+\(\alpha\leq0\), NaN, or infinity & Rejected during mobility initialization. \\
+Empty \code{inclusionFile} & \(I=0\) for every node; ordinary BCC\_nl. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\code{MobEshelbyResist} is dimensionless.  It is not a velocity and not an
+absolute mobility.  It follows the established ParaDiS Eshelby convention
+\[
+ B_{\rm inside}=\alpha B_{\rm outside}.
+\]
+
+When \code{useLabFrame} is enabled, Equation~\eqref{eq:indicator} is still
+evaluated in simulation coordinates before any crystal-frame mobility
+rotation.  The force, velocity, arm, and Burgers vectors then follow the
+ordinary BCC\_nl rotation path.
+
+\section{Control-file input}
+
+The following block can replace the material/mobility section of a BCC
+nonlinear control file.  The numerical values are the existing tantalum-like
+defaults and must be replaced by the calibration for the intended material.
+
+\begin{verbatim}
+# Enable particle geometry and select the binary nodal law
+mobilityLaw = "BCC_nl_Eshelby_Resist"
+inclusionFile = "tests/screwEsh.dat"
+materialTypeName = "BCC"
+
+# Dimensionless inside drag multiplier
+# 1.0: no change; values greater than 1 reduce inside mobility
+MobEshelbyResist = 1.0e5
+
+# Thermodynamic state
+TempK = 600.0
+pressure = 0.0
+
+# BCC_nl linear mobilities outside and inside
+# Inside values are converted to drag and multiplied by MobEshelbyResist
+MobGlide = 1.0e2
+MobLine = 1.0e4
+MobClimb = 1.0e-5
+
+# BCC_nl nonlinear screw parameters
+MobPeierls = 3.240000e8
+MobDeltaH0 = 1.728748e-19
+MobAlpha = 9.661236e-1
+MobExpP = 0.5
+MobExpQ = 1.23
+MobCoeffA = 1.525
+MobCoeffC = 2.032370e-1
+MobCoeffC0 = 2.048000e3
+MobCoeffD = 1.626950e-4
+meltTemp = 3.170683e3
+
+# Optional nonlinear-property files; empty uses the values above
+MobFileNL = ""
+ecFile = ""
+meltTempFile = ""
+\end{verbatim}
+
+For the repository's screw/inclusion data, a one-step serial smoke test is
+\begin{verbatim}
+bin/paradis -maxstep 1 -s -d tests/screwEsh.data \
+  path/to/BCC_nl_Eshelby_Resist.ctrl
+\end{verbatim}
+
+Unlike the BCC\_0-inside hybrid, this law does not read \code{MobScrew} or
+\code{MobEdge}.  Its only new constitutive input is
+\code{MobEshelbyResist}; all other mobility inputs are inherited from
+BCC\_nl.
+
+\section{Registration and restart behavior}
+
+The selector is registered under \code{ESHELBY} with BCC, non-planar,
+no-fuzzy-plane, and no-cross-slip attributes matching \code{BCC_nl}.
+\path{src/DisableUnneededParams.cc} retains:
+\begin{itemize}
+ \item \code{inclusionFile} and \code{MobEshelbyResist};
+ \item \code{pressure}, \code{TempK}, and all BCC nonlinear constants;
+ \item \code{MobGlide}, \code{MobLine}, and \code{MobClimb};
+ \item optional \code{MobFileNL}, \code{ecFile}, and \code{meltTempFile}.
+\end{itemize}
+No new parameter binding is needed.  \code{MobEshelbyResist} and
+\code{inclusionFile} are already defined by the existing parameter layer.
+
+\section{Verification and cautions}
+
+The implementation was checked with:
+\begin{itemize}
+ \item syntax compilation with and without \code{ESHELBY};
+ \item complete serial links in both build modes;
+ \item symbol inspection showing the selector and public functions only in the
+       ESHELBY binary;
+ \item a one-step ParaDiS run using \path{tests/screwEsh.data} and
+       \path{tests/screwEsh.dat};
+ \item source-level checks of \(\beta=1\), outside, and
+       Equation~\eqref{eq:force-equivalence};
+ \item periodic, rotated-ellipsoid, boundary, and overlap analysis of the
+       point-membership equation.
+\end{itemize}
+
+The membership loop scans the locally available inclusion array for every
+mobile node.  This guarantees that node-only and zero-length-arm cases do not
+depend on segment intersection lists, but its cost grows with the number of
+local and ghost inclusions.  If very large particle populations make this
+dominant, a spatial point-query index can replace the scan without changing
+Equations~\eqref{eq:indicator}--\eqref{eq:jacobian}.
+
+The copied BCC\_nl solver intentionally preserves the original law's numerical
+branches so the outside limit remains exact.  Baseline nonlinear-solver
+changes should be applied separately and consistently to both source files.
+
+\end{document}

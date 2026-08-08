@@ -1,0 +1,1035 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,mathtools,bm}
+\usepackage{booktabs,longtable,tabularx,array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!55!black,
+  urlcolor=blue!55!black,
+  pdftitle={Mathematical Guide to the KGParadis Eshelby Implementations}
+}
+
+\setcounter{tocdepth}{2}
+\setlist{nosep,leftmargin=*}
+\allowdisplaybreaks
+
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{P}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcommand{\vect}[1]{\bm{#1}}
+\newcommand{\abs}[1]{\left\lvert #1\right\rvert}
+\newcommand{\norm}[1]{\left\lVert #1\right\rVert}
+\newcommand{\dd}{\,\mathrm{d}}
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+\newcommand{\R}{\mathbb{R}}
+
+\title{Mathematical Guide to the KGParadis\\
+       \texttt{src/Eshelby*} Implementations}
+\author{Source-level technical documentation}
+\date{Code snapshot reviewed 7 August 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This document explains every source file matching \path{src/Eshelby*} in the
+reviewed KGParadis tree.  It gives the equations represented by the packed
+arrays, relates each loop and matrix operation to a Cartesian multi-index
+formula, and derives the direct segment--inclusion nodal force.  Equations
+labelled ``literal implementation'' describe what the present source computes;
+where that differs from the recentering identity or from another code path, the
+difference is stated explicitly rather than silently corrected.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Scope and computational architecture}
+
+There are eight matching files.  Seven implement the Eshelby-specific fast
+multipole method (FMM), while one evaluates a nearby inclusion's force on a
+straight dislocation segment by analytic line integration.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}P{0.35\textwidth}Y P{0.105\textwidth}@{}}
+\toprule
+File & Role & Guard \\
+\midrule
+\path{src/EshelbyBuildMatrix.cc} &
+  Reconstructs a rectangular contraction block from a packed fully symmetric
+  tensor. & none \\
+\path{src/EshelbyDerofR.cc} &
+  Generates all unique Cartesian derivatives of the inverse-distance kernel
+  needed by M2L. & none \\
+\path{src/EshelbyEvalTaylor.cc} &
+  Evaluates a local Taylor expansion at a point and returns a symmetric stress
+  matrix. & \code{ESHELBY} \\
+\path{src/EshelbyForce.cc} &
+  Integrates the inclusion-induced line-force density against the two linear
+  nodal shape functions. & both \\
+\path{src/EshelbyMakeEta.cc} &
+  Forms raw monomial multipole moments for one spherical inclusion; it is also
+  reused to form displacement monomials. & none \\
+\path{src/EshelbyMakeTaylor.cc} &
+  Performs the multipole-to-local (M2L) operation. & \code{ESHELBY} \\
+\path{src/EshelbyTranslateEta.cc} &
+  Performs a hard-coded multipole-to-multipole (M2M) binomial translation
+  through order six. & \code{ESHELBY} \\
+\path{src/EshelbyTranslateTaylor.cc} &
+  Performs the local-to-local (L2L) translation used in the downward FMM pass.
+  & \code{ESHELBY} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Here ``both'' means that \path{src/EshelbyForce.cc} is nested inside
+\code{ESHELBY} and \code{ESHELBYFORCE}.  The far-field sequence is
+\[
+\boxed{
+\text{inclusion}
+\xrightarrow{\text{MakeEta}} M
+\xrightarrow{\text{TranslateEta}} M'
+\xrightarrow[\text{BuildMatrix}]{\text{DerofR + MakeTaylor}} L
+\xrightarrow{\text{TranslateTaylor}} L'
+\xrightarrow{\text{EvalTaylor}} \vect{\sigma}(\vect{x}) .
+}
+\]
+The direct path \path{src/EshelbyForce.cc} bypasses these expansions and
+returns the two endpoint forces directly.
+
+The global setup limits the sum of multipole and Taylor orders to
+\[
+p+t\leq \code{MAX_ORDER_ESHELBY}=6
+\]
+in \path{include/FM.h}:14 and \path{src/FMComm.cc}:1464--1485.  This is
+essential because the derivative and translation tables stop at that order.
+
+\section{Shared mathematical representation}
+
+\subsection{Multi-indices and packed symmetric tensors}
+
+For a Cartesian multi-index
+\[
+\alpha=(\alpha_x,\alpha_y,\alpha_z)\in\mathbb{N}_0^3,
+\qquad
+\abs{\alpha}=\alpha_x+\alpha_y+\alpha_z,
+\]
+write
+\[
+\vect{x}^{\alpha}=x^{\alpha_x}y^{\alpha_y}z^{\alpha_z},
+\qquad
+\alpha!=\alpha_x!\alpha_y!\alpha_z!,
+\qquad
+\binom{\alpha}{\beta}
+=\prod_{q\in\{x,y,z\}}\binom{\alpha_q}{\beta_q}.
+\]
+
+The shared table at \path{src/FMComm.cc}:78 is
+\[
+\code{sequence}[n]=S_n=\binom{n+2}{3}.
+\]
+It is the number of unique components in all symmetric ranks below (n).
+Consequently, a symmetric rank-(n) tensor has
+\[
+N_n=S_{n+1}-S_n=\binom{n+2}{2}
+\]
+unique entries and occupies the half-open global interval
+\([S_n,S_{n+1})\).
+
+For \(\alpha=(a,b,c)\), \(a+b+c=n\), define \(u=b+c\).  Its local and global
+packed indices are
+\begin{equation}
+\ell_n(a,b,c)=\frac{u(u+1)}{2}+c,
+\qquad
+I(\alpha)=S_n+\ell_n(a,b,c).
+\label{eq:packed-index}
+\end{equation}
+Thus the order is
+\[
+\begin{array}{@{}cl@{}}
+n&\text{packed components}\ \\
+0&1\\
+1&x,\ y,\ z\\
+2&x^2,\ xy,\ xz,\ y^2,\ yz,\ z^2\\
+3&x^3,\ x^2y,\ x^2z,\ xy^2,\ xyz,\ xz^2,
+   y^3,\ y^2z,\ yz^2,\ z^3.
+\end{array}
+\]
+The comments made of digits in the source use \(1=x\), \(2=y\), and \(3=z\).
+For example, \code{1 1 2 3} means the \(x^2yz\) component.
+
+Moment vectors through degree \(p\) contain \(S_{p+1}\) entries.  Local Taylor
+vectors omit ranks zero and one and store ranks two through \(t+2\); their
+local packed index and total length are
+\begin{equation}
+J(\alpha)=I(\alpha)-4,
+\qquad
+2\leq\abs{\alpha}\leq t+2,
+\qquad
+N_L=S_{t+3}-4.
+\label{eq:taylor-layout}
+\end{equation}
+In particular, the first six Taylor entries are ordered
+\[
+(xx,xy,xz,yy,yz,zz).
+\]
+
+\subsection{Factorial weights}
+
+The raw monomial and moment arrays do not include factorial denominators.
+The array \code{multFactor}, initialized in \path{src/FMComm.cc}:149--255,
+contains
+\begin{equation}
+\code{multFactor}[I(\alpha)-S_2]=\frac{1}{\alpha!},
+\qquad 2\leq\abs{\alpha}\leq6.
+\label{eq:multfactor}
+\end{equation}
+Degrees zero and one need no stored factor because their factorials are one.
+The M2L, L2L, and evaluation routines apply these factors immediately before a
+matrix--vector product.
+
+\subsection{The far-field kernel}
+
+Let \(r=\norm{\vect{r}}\).  The FMM is built from the symmetric tensor
+\begin{equation}
+K_{ij}(\vect{r})
+=\frac{\delta_{ij}}{r^3}-\frac{3r_i r_j}{r^5}
+=-\partial_i\partial_j\frac{1}{r}.
+\label{eq:kernel}
+\end{equation}
+For a spherical inclusion of radius (a) and volumetric strain
+\[
+E_v=\varepsilon_{xx}+\varepsilon_{yy}+\varepsilon_{zz},
+\]
+the scalar source strength and isotropic material factor used by the FMM are
+\begin{equation}
+q=E_v a^3,
+\qquad
+A(\mu,\nu)=\frac{\mu(1+\nu)}{1-2\nu}.
+\label{eq:source-strength}
+\end{equation}
+The monopole field represented by that path is therefore
+\begin{equation}
+\sigma_{ij}^{\mathrm{FMM}}(\vect{r})
+=AqK_{ij}(\vect{r})
+=A E_v a^3
+ \left(\frac{\delta_{ij}}{r^3}
+       -\frac{3r_i r_j}{r^5}\right).
+\label{eq:fmm-monopole}
+\end{equation}
+No factor \(4\pi/3\) is stored: \(E_va^3\), not geometric volume times strain,
+is the source normalization in this implementation.
+
+\section{\texttt{EshelbyMakeEta.cc}: particle-to-multipole moments}
+
+The implementation is at \path{src/EshelbyMakeEta.cc}:35--166.  With inclusion
+position \(\vect{x}_s\), expansion center \(\vect{c}\), radius \(a=R_0\), and
+requested order \(p\), it first forms
+\begin{equation}
+\vect{d}=\vect{c}-\vect{x}_s,
+\qquad q=E_vR_0^3.
+\label{eq:makeeta-d}
+\end{equation}
+The assignments at lines 56--159 enumerate every raw monomial through degree
+six.  The final scaling loop at lines 161--163 makes the returned coefficient
+for every \(\abs{\alpha}\leq p\)
+\begin{equation}
+\boxed{M_\alpha=q\vect{d}^{\alpha}.}
+\label{eq:makeeta}
+\end{equation}
+For example,
+\[
+\begin{aligned}
+(M_0,M_x,M_y,M_z)&=q(1,d_x,d_y,d_z),\\
+(M_{xx},M_{xy},M_{xz},M_{yy},M_{yz},M_{zz})
+&=q(d_x^2,d_xd_y,d_xd_z,d_y^2,d_yd_z,d_z^2).
+\end{aligned}
+\]
+There is deliberately no \(1/\alpha!\) in \eqref{eq:makeeta}; callers apply
+\eqref{eq:multfactor} when a Taylor theorem requires it.
+
+For many inclusions in one leaf cell, \path{src/CellCharge.cc}:613--650 sums
+these coefficients, so the cell moment is
+\begin{equation}
+M_\alpha=\sum_s E_{v,s}a_s^3(\vect{c}-\vect{x}_s)^\alpha.
+\label{eq:cell-moment}
+\end{equation}
+That call site also rejects unequal radii for the FMM.  The file's contract is
+\(0\leq p\leq6\); the function itself does not validate the order.
+
+\section{\texttt{EshelbyDerofR.cc}: derivatives of the kernel}
+
+The routine at \path{src/EshelbyDerofR.cc}:22--856 accepts a nonzero separation
+vector \(\vect{x}\) and fills all distinct components of
+\begin{equation}
+D_{i_1\ldots i_n}(\vect{x})
+=-\partial_{i_1}\cdots\partial_{i_n}\frac{1}{r},
+\qquad 2\leq n\leq\code{order}+2.
+\label{eq:derofr-definition}
+\end{equation}
+Rank two is exactly \(K_{ij}\) from \eqref{eq:kernel}.  A compact formula
+covering all hard-coded entries is
+\begin{equation}
+\begin{split}
+D_{i_1\ldots i_n}
+={}&\sum_{p=0}^{\lfloor n/2\rfloor}
+(-1)^{n-p+1}(2n-2p-1)!!\,
+r^{-(2n-2p+1)}\\
+&\quad\times
+\sum_{\mathcal P_p}
+\left(\prod_{\{a,b\}\in\mathcal P_p}\delta_{i_ai_b}\right)
+\left(\prod_{c\notin V(\mathcal P_p)}x_{i_c}\right),
+\end{split}
+\label{eq:cartesian-derivative}
+\end{equation}
+where \(\mathcal P_p\) ranges over all choices of \(p\) disjoint pairs of
+index positions, and \(V(\mathcal P_p)\) is the set of paired positions.
+
+The first two nontrivial ranks illustrate the coefficients encoded by the
+source:
+\begin{align}
+D_{ijk}
+={}&-\frac{3}{r^5}
+ (\delta_{ij}x_k+\delta_{ik}x_j+\delta_{jk}x_i)
+ +\frac{15x_ix_jx_k}{r^7},
+\label{eq:rank3}\displaybreak[0]\\
+D_{ijkl}
+={}&-\frac{3}{r^5}
+ (\delta_{ij}\delta_{kl}+\delta_{ik}\delta_{jl}
+  +\delta_{il}\delta_{jk})
+ +\frac{15}{r^7}\operatorname{Sym}_{6}(\delta_{ij}x_kx_l)
+ -\frac{105x_ix_jx_kx_l}{r^9}.
+\label{eq:rank4}
+\end{align}
+Here \(\operatorname{Sym}_{6}\) denotes the six distinct placements of one
+Kronecker delta and two coordinates.
+
+The inverse-radius cache obeys
+\begin{equation}
+\code{dinv}[0]=r^{-1},
+\qquad
+\code{dinv}[m]=(2m-1)!!r^{-(2m+1)},
+\qquad 1\leq m\leq8,
+\label{eq:dinv}
+\end{equation}
+and \code{xv} stores the monomials at index \(I(\alpha)\).  Since
+\code{drList} omits ranks zero and one,
+\begin{equation}
+\boxed{
+\code{drList}[S_n-4+\ell_n(\alpha)]=D_\alpha,
+\qquad n=\abs{\alpha}\geq2.
+}
+\label{eq:drlist-layout}
+\end{equation}
+
+\begin{center}
+\begin{tabular}{@{}rrrr@{}}
+\toprule
+Condition & New rank & \code{drList} indices & Source lines \\
+\midrule
+always & 2 & 0--5 & 57--62 \\
+\code{order > 0} & 3 & 6--15 & 64--89 \\
+\code{order > 1} & 4 & 16--30 & 92--162 \\
+\code{order > 2} & 5 & 31--51 & 164--259 \\
+\code{order > 3} & 6 & 52--79 & 262--399 \\
+\code{order > 4} & 7 & 80--115 & 402--592 \\
+\code{order > 5} & 8 & 116--160 & 594--851 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The required length is
+\[
+S_{\code{order}+3}-4=\binom{\code{order}+5}{3}-4.
+\]
+An independent symbolic check of all 161 hard-coded components through rank
+eight found agreement with \eqref{eq:derofr-definition} to floating-point
+roundoff at a generic nonsymmetric point.  There is no \(r=0\) guard; separated
+FMM cells are an input precondition.
+
+\section{\texttt{EshelbyBuildMatrix.cc}: unpacking contraction blocks}
+
+This utility is implemented at \path{src/EshelbyBuildMatrix.cc}:40--87.  For
+arguments called Taylor order \(t\) and multipole order \(m\), its active matrix
+has
+\begin{equation}
+n_r=N_{t+2}=\binom{t+4}{2},
+\qquad
+n_c=N_m=\binom{m+2}{2}.
+\label{eq:buildmatrix-size}
+\end{equation}
+Rows correspond to \(\abs{\alpha}=t+2\), columns to
+\(\abs{\beta}=m\), and the mathematical operation is simply
+\begin{equation}
+\boxed{B_{\alpha\beta}=D_{\alpha+\beta}.}
+\label{eq:buildmatrix}
+\end{equation}
+
+More explicitly, the row loops at lines 69--83 enumerate
+\[
+\alpha=(t+2-i,i-j,j),
+\quad
+r_{\mathrm{row}}=\frac{i(i+1)}2+j,
+\quad 0\leq j\leq i\leq t+2,
+\]
+and the column loops enumerate
+\[
+\beta=(m-k,k-l,l),
+\quad
+c_{\mathrm{col}}=\frac{k(k+1)}2+l,
+\quad 0\leq l\leq k\leq m.
+\]
+The source's running offset simplifies to
+\[
+\code{drOffset}
+=\frac{(i+k)(i+k+1)}2+j+l
+=\ell_{t+m+2}(\alpha+\beta),
+\]
+which proves \eqref{eq:buildmatrix}.  Storage is row-major with caller-provided
+leading dimension \code{mCols}:
+\[
+\code{matrix}[r\,\code{mCols}+c].
+\]
+Only the active upper-left rectangle is cleared; padding in an oversized work
+array is left unchanged.  Although the argument is named \code{drList}, the
+routine is generic for this packed layout: the Taylor evaluation and L2L paths
+also pass a packed Taylor tensor to it.  It applies neither a factorial nor a
+material factor.
+
+\section{\texttt{EshelbyMakeTaylor.cc}: multipole-to-local conversion}
+
+The M2L routine is at \path{src/EshelbyMakeTaylor.cc}:30--124.  Let
+\(\vect{c}_s\) be the source-cell center, \(\vect{c}_t\) the target-cell center,
+and
+\[
+\vect{R}=\vect{c}_t-\vect{c}_s.
+\]
+This direction is established by the production call at
+\path{src/CellCharge.cc}:284--326.  For every local derivative multi-index
+\(\alpha\), \(\abs{\alpha}\leq t\), the generated Taylor tensor is
+\begin{equation}
+\boxed{
+L_{ij,\alpha}
+=A(\mu,\nu)
+ \sum_{\abs{\beta}\leq p}
+ D_{ij,\alpha+\beta}(\vect{R})\frac{M_\beta}{\beta!}.
+}
+\label{eq:m2l}
+\end{equation}
+All free indices are symmetric, so \(L_{ij,\alpha}\) is stored as one packed
+tensor component of rank \(\abs{\alpha}+2\), using \eqref{eq:taylor-layout}.
+
+The source realizes \eqref{eq:m2l} as follows.
+\begin{enumerate}
+\item Lines 43--48 allocate
+  \(S_{p+t+3}-4\) entries and call \code{EshelbyDerofR} through derivative
+  rank \(p+t+2\).
+\item Lines 50--86 assemble every \((\abs{\alpha}+2,\abs{\beta})\) block with
+  \code{EshelbyBuildMatrix}.  The complete rectangular matrix has
+  \[
+  (S_{t+3}-4)\ \text{rows and}\ S_{p+1}\ \text{columns}.
+  \]
+\item Lines 91--105 copy \(M_\beta\) and multiply degrees two and above by
+  \(1/\beta!\).  The \code{multFactor} table must already have been
+  initialized by \code{EshelbyInitFMArray}.
+\item Lines 109--114 perform the matrix--vector product and multiply every
+  output by
+  \[
+  A(\mu,\nu)=\frac{\mu(1+\nu)}{1-2\nu}.
+  \]
+\end{enumerate}
+The separation must be nonzero and \(p+t\leq6\).  The material factor is
+singular at \(\nu=1/2\).
+
+\section{\texttt{EshelbyTranslateEta.cc}: multipole translation}
+
+\subsection{The binomial contraction represented by the table}
+
+The M2M implementation is at \path{src/EshelbyTranslateEta.cc}:27--649.  It
+first calls
+\[
+\code{EshelbyMakeEta}(1,1,\code{newCenter},\code{oldCenter},p,\ldots),
+\]
+so, by \eqref{eq:makeeta-d}, its literal displacement is
+\begin{equation}
+\vect{\delta}=\vect{c}_{\mathrm{old}}-\vect{c}_{\mathrm{new}}.
+\label{eq:literal-shift}
+\end{equation}
+The outer product at lines 42--54 constructs
+\[
+\code{mat}_{\beta\gamma}=M_\beta\vect{\delta}^{\gamma}.
+\]
+The long rank-by-rank table then implements the symmetric-tensor binomial
+convolution
+\begin{equation}
+\boxed{
+\widetilde M_\alpha
+=\sum_{0\leq\beta\leq\alpha}
+  \binom{\alpha}{\beta}
+  M_\beta\vect{\delta}^{\alpha-\beta},
+\qquad \abs{\alpha}\leq p,
+}
+\label{eq:m2m-literal}
+\end{equation}
+apart from the single table entry discussed below.  The implemented blocks are
+rank zero and one at lines 56--64, rank two at 67--79, rank three at 82--125,
+rank four at 130--217, rank five at 220--373, and rank six at 377--646.
+
+For example, the rank-two and pure rank-three formulas are
+\begin{align*}
+\widetilde M_{xx}
+&=M_{xx}+2M_x\delta_x+M_0\delta_x^2,\\
+\widetilde M_{xxx}
+&=M_{xxx}+3M_{xx}\delta_x+3M_x\delta_x^2+M_0\delta_x^3.
+\end{align*}
+The explicit coefficients \(2,3,6,10,15,20,\ldots\) are the multi-index
+binomial coefficients in \eqref{eq:m2m-literal}.
+
+\subsection{Literal direction versus the recentering identity}
+
+Moments constructed by \code{EshelbyMakeEta} satisfy
+\[
+M_\alpha^{\mathrm{old}}
+=\sum_s q_s(\vect{c}_{\mathrm{old}}-\vect{x}_s)^\alpha.
+\]
+Direct construction at the new center therefore requires
+\begin{equation}
+M_\alpha^{\mathrm{new}}
+=\sum_{\beta\leq\alpha}\binom{\alpha}{\beta}
+ M_\beta^{\mathrm{old}}
+ \vect{h}^{\alpha-\beta},
+\qquad
+\vect{h}=\vect{c}_{\mathrm{new}}-\vect{c}_{\mathrm{old}}.
+\label{eq:m2m-intended}
+\end{equation}
+The implementation uses \(\vect{\delta}=-\vect{h}\), reversing all terms
+with odd shift degree.  This is not just a naming ambiguity: the upward-pass
+call at \path{src/FMComm.cc}:2282--2294 passes the parent as the new center and
+the child as the old center, consistent with the function comment.  At first
+order, the distinction is already visible:
+\[
+\underbrace{M_x^{\mathrm{old}}+(c_{\mathrm{new},x}-c_{\mathrm{old},x})M_0}
+_{\text{direct recentering}}
+\quad\hbox{versus}\quad
+\underbrace{M_x^{\mathrm{old}}+(c_{\mathrm{old},x}-c_{\mathrm{new},x})M_0}
+_{\text{literal source}}.
+\]
+
+\subsection{Table audit and resource behavior}
+
+An equation-by-equation audit of all 80 explicit rank-two through rank-six
+updates found one index mismatch and no other coefficient/index mismatch.
+For \code{ep[41]}, the \(x^2y^3\) component, line 268 contains
+\[
+\code{mat}(xx,yyy)+\code{mat}(yyy,xz),
+\]
+where the symmetric second term required by \eqref{eq:m2m-literal} is
+\[
+\code{mat}(xx,yyy)+\code{mat}(yyy,xx).
+\]
+In source indices, \code{ELEM(16,6,nCols)} would have to be
+\code{ELEM(16,4,nCols)}.  As written, this one term combines to the wrong
+multi-index.
+
+The arrays \code{etaTrans} and \code{mat} allocated at lines 37 and 47 are not
+freed before the return at line 648, so every call leaks both buffers.  Input
+and output may otherwise alias safely because the full outer product is built
+before \code{ep} is written.
+
+\section{\texttt{EshelbyTranslateTaylor.cc}: local translation}
+
+The L2L routine is at \path{src/EshelbyTranslateTaylor.cc}:25--126.  For output
+derivative order \(i=0,\ldots,t\) and displacement degree
+\(j=0,\ldots,t-i\), it asks \code{EshelbyBuildMatrix} for
+\begin{equation}
+B^{(i,j)}_{\alpha\beta}=L_{\alpha+\beta},
+\qquad \abs{\alpha}=i+2,\quad \abs{\beta}=j.
+\label{eq:l2l-block}
+\end{equation}
+The row and column block offsets at lines 72--84 are \(S_{i+2}-4\) and \(S_j\),
+respectively.  Lines 105--117 then multiply each disjoint row block by all
+admissible displacement monomials.  With correctly normalized monomials, the
+literal displacement from \eqref{eq:literal-shift} gives
+\begin{equation}
+\boxed{
+\widetilde L_\alpha
+=\sum_{\abs{\beta}\leq t-i}
+ L_{\alpha+\beta}\frac{\vect{\delta}^{\beta}}{\beta!},
+\qquad \abs{\alpha}=i+2.
+}
+\label{eq:l2l-literal}
+\end{equation}
+
+On the other hand, \code{EshelbyEvalTaylor} uses powers of
+\(\vect{x}-\vect{c}\).  The mathematical recentering identity for a polynomial
+from \(\vect{c}_{\mathrm{old}}\) to \(\vect{c}_{\mathrm{new}}\) is therefore
+\begin{equation}
+L_\alpha^{\mathrm{new}}
+=\sum_{\abs{\beta}\leq t-i}
+ L_{\alpha+\beta}^{\mathrm{old}}
+ \frac{\vect{h}^{\beta}}{\beta!},
+\qquad \vect{h}=\vect{c}_{\mathrm{new}}-\vect{c}_{\mathrm{old}}.
+\label{eq:l2l-intended}
+\end{equation}
+The file again uses \(\vect{\delta}=-\vect{h}\).  The downward call at
+\path{src/FMComm.cc}:2074--2125 passes the parent center as old and child center
+as new, so odd shift-degree terms have the opposite sign from
+\eqref{eq:l2l-intended} under the documented evaluation convention.
+
+There is also a precise endpoint error in factorial scaling.  Lines 51--55 set
+the last valid index to \(S_{t+1}-1\) but loop while the index is strictly less
+than that value.  For every \(t\geq2\), all needed monomials are divided by
+their factorial except the final packed component:
+\begin{equation}
+q_\beta=\frac{\vect{\delta}^{\beta}}{\beta!}
+\quad\text{except}\quad
+q_{(0,0,t)}=\delta_z^t.
+\label{eq:l2l-factor-bug}
+\end{equation}
+Thus only the output rank-two block can receive the highest-degree error, with
+excess
+\[
+\left(1-\frac{1}{t!}\right)
+L_{\alpha+(0,0,t)}\delta_z^t,
+\qquad \abs{\alpha}=2.
+\]
+The temporary matrix is freed at lines 89--90, and the two remaining buffers
+are freed at lines 119--123.
+
+\section{\texttt{EshelbyEvalTaylor.cc}: local expansion at a point}
+
+The implementation is at \path{src/EshelbyEvalTaylor.cc}:24--100.  Let
+\[
+\vect{y}=\vect{x}-\vect{c}_t.
+\]
+The call at line 41 deliberately reverses the apparently descriptive
+arguments to \code{EshelbyMakeEta}:
+\[
+\code{position}=\vect{c}_t,
+\qquad
+\code{center}=\vect{x},
+\]
+which correctly produces raw powers \(\vect{y}^\alpha\).  Lines 69--75 apply
+every \(1/\alpha!\) factor, including the final component.  The evaluated
+stress is
+\begin{equation}
+\boxed{
+\sigma_{ij}(\vect{x})
+=\sum_{\abs{\alpha}\leq t}
+ L_{ij,\alpha}\frac{\vect{y}^{\alpha}}{\alpha!}.
+}
+\label{eq:taylor-eval}
+\end{equation}
+
+For each degree, \code{EshelbyBuildMatrix(taylorSeries,0,i,...)} reconstructs
+the six stress rows \(ij\in(xx,xy,xz,yy,yz,zz)\) from the packed fully
+symmetric local tensor.  After the matrix--vector product, lines 82--90 return
+\begin{equation}
+\vect{\sigma}=
+\begin{pmatrix}
+\sigma_{xx}&\sigma_{xy}&\sigma_{xz}\\
+\sigma_{xy}&\sigma_{yy}&\sigma_{yz}\\
+\sigma_{xz}&\sigma_{yz}&\sigma_{zz}
+\end{pmatrix}.
+\label{eq:stress-unpack}
+\end{equation}
+The allocated matrix and output vector have \(S_{t+3}-4\) rows even though
+only their first six rows are populated or consumed; this is extra work and
+storage, not a change to \eqref{eq:taylor-eval}.
+
+\section{\texttt{EshelbyForce.cc}: analytic endpoint force}
+
+\subsection{Inputs and model restrictions}
+
+The helpers are at \path{src/EshelbyForce.cc}:31--103 and the public routine at
+lines 134--287.  It uses the inclusion center \(\vect{c}\), three radius
+entries, the six-component symmetric strain vector, two segment endpoints,
+and the Burgers vector \(\vect{b}\).  The strain layout is
+\[
+(\varepsilon_{xx},\varepsilon_{yy},\varepsilon_{zz},
+  \varepsilon_{yz},\varepsilon_{xz},\varepsilon_{xy}),
+\]
+but the routine uses only
+\[
+E_v=\varepsilon_{xx}+\varepsilon_{yy}+\varepsilon_{zz}.
+\]
+The source comment assumes the three diagonal entries are equal, although the
+code checks neither equality nor absence of deviatoric diagonal strain.  All
+shear entries are ignored.
+
+Although the inclusion type stores three semi-principal axes, this routine sets
+\begin{equation}
+a=\max(a_x,a_y,a_z)
+\label{eq:max-radius}
+\end{equation}
+and performs a spherical intersection.  It does not receive or use the
+ellipsoid orientation.  Matrix properties are \((\mu_1,\nu_1)\), while
+inclusion properties are \((\mu_2,\nu_2)\); initialization makes material 2
+equal to material 1 if no second values were supplied.
+
+\subsection{Segment geometry and sphere intersection}
+
+Let the endpoints be \(\vect{x}_1,\vect{x}_2\), and define
+\begin{equation}
+\vect{\ell}=\vect{x}_2-\vect{x}_1,
+\qquad L=\norm{\vect{\ell}},
+\qquad \vect{t}=\frac{\vect{\ell}}{L}.
+\label{eq:segment-tangent}
+\end{equation}
+With \(\vect{R}_i=\vect{x}_i-\vect{c}\), the axial coordinates and closest
+approach vector are
+\begin{equation}
+s_0=\vect{R}_1\mathbin{\cdot}\vect{t},
+\qquad
+s_1=\vect{R}_2\mathbin{\cdot}\vect{t}=s_0+L,
+\qquad
+\vect{n}=\vect{R}_1-s_0\vect{t},
+\qquad d^2=\norm{\vect{n}}^2.
+\label{eq:line-coordinates}
+\end{equation}
+Hence a segment point and its distance from the inclusion center are
+\begin{equation}
+\vect{r}(s)=\vect{n}+s\vect{t},
+\qquad
+\rho(s)=\sqrt{d^2+s^2},
+\qquad s\in[s_0,s_1].
+\label{eq:line-parameterization}
+\end{equation}
+The infinite line intersects the effective sphere when
+\(\Delta=a^2-d^2>0\), at
+\begin{equation}
+s_-=-\sqrt{\Delta},
+\qquad s_+=+\sqrt{\Delta}.
+\label{eq:sphere-intersection}
+\end{equation}
+
+Lines 209--244 divide the segment into exterior set \(\mathcal O\) and
+interior set \(\mathcal I\):
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}Y Y Y@{}}
+\toprule
+Case & \(\mathcal O\) & \(\mathcal I\) \\
+\midrule
+line miss or no segment overlap & \([s_0,s_1]\) & \(\varnothing\) \\
+starts inside, exits & \([s_+,s_1]\) & \([s_0,s_+]\) \\
+enters, ends inside & \([s_0,s_-]\) & \([s_-,s_1]\) \\
+wholly inside & \(\varnothing\) & \([s_0,s_1]\) \\
+passes through & \([s_0,s_-]\cup[s_+,s_1]\) & \([s_-,s_+]\) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+For two exterior pieces, their five integral vectors are added componentwise.
+
+\subsection{Interior and exterior primitive integrals}
+
+For an interior interval \([p,q]\), \code{EshelbySpecialIntegrals} returns
+\begin{equation}
+S_0=\int_p^q1\dd s=q-p,
+\qquad
+S_1=\int_p^qs\dd s=\frac{q^2-p^2}{2}.
+\label{eq:inside-integrals}
+\end{equation}
+
+For an exterior interval, \code{EshelbyIntegrals} returns endpoint differences
+of the following antiderivatives:
+\begin{align}
+\Phi_{03}(s)&=\frac{s}{d^2\rho},
+&\Phi_{13}(s)&=-\frac{1}{\rho},\nonumber\\
+\Phi_{05}(s)&=\frac{2\Phi_{03}(s)+s/\rho^3}{d^2},
+&\Phi_{15}(s)&=-\frac{1}{\rho^3},\nonumber\\
+\Phi_{25}(s)&=\Phi_{03}(s)-\frac{s}{\rho^3}.
+\label{eq:force-primitives}
+\end{align}
+Thus the array \code{wInt} has the exact meanings
+\begin{equation}
+\begin{aligned}
+W_0&=\int_{\mathcal O}\rho^{-3}\dd s,
+&W_1&=\int_{\mathcal O}s\rho^{-3}\dd s,\\
+W_2&=3\int_{\mathcal O}\rho^{-5}\dd s,
+&W_3&=3\int_{\mathcal O}s\rho^{-5}\dd s,\\
+W_4&=3\int_{\mathcal O}s^2\rho^{-5}\dd s.
+\end{aligned}
+\label{eq:wint}
+\end{equation}
+The factors of three in the last three entries are part of the array
+definition.
+
+If
+\[
+d^2<10^{-8}(p^2+q^2),
+\]
+the source uses the collinear limit
+\[
+\Phi_{03}=-\frac{s}{2\rho^3},
+\qquad \Phi_{13}=-\rho^{-1},
+\qquad \Phi_{05}=\Phi_{15}=\Phi_{25}=0.
+\]
+At exactly \(d=0\), the zeroed terms multiply
+\(\vect{n}\times\vect{t}=\vect{0}\); for small nonzero \(d\), this is an
+approximation.  The code computes \(1/d^2\) before taking this branch, so an
+exactly collinear case still produces an unused floating-point infinity.
+
+\subsection{Shape functions and endpoint moments}
+
+The linear segment shape functions are
+\begin{equation}
+N_1(s)=\frac{s_1-s}{L},
+\qquad
+N_2(s)=\frac{s-s_0}{L}.
+\label{eq:shape-functions}
+\end{equation}
+For endpoint 2, lines 258--261 form
+\begin{align}
+F_{03}^{(2)}&=W_1-s_0W_0,
+&F_{05}^{(2)}&=W_3-s_0W_2,\nonumber\\
+F_{15}^{(2)}&=W_4-s_0W_3,
+&F_{\mathrm{SP}}^{(2)}&=S_1-s_0S_0.
+\label{eq:endpoint2-moments}
+\end{align}
+For endpoint 1, lines 275--278 form
+\begin{align}
+F_{03}^{(1)}&=s_1W_0-W_1,
+&F_{05}^{(1)}&=s_1W_2-W_3,\nonumber\\
+F_{15}^{(1)}&=s_1W_3-W_4,
+&F_{\mathrm{SP}}^{(1)}&=s_1S_0-S_1.
+\label{eq:endpoint1-moments}
+\end{align}
+For example,
+\[
+F_{05}^{(2)}=3\int_{\mathcal O}(s-s_0)\rho^{-5}\dd s,
+\qquad
+F_{\mathrm{SP}}^{(1)}=\int_{\mathcal I}(s_1-s)\dd s.
+\]
+Division by \(L\) is applied later through the material factors.
+
+\subsection{Vector and material contraction}
+
+The three fixed vectors at lines 246--256 are
+\begin{equation}
+\vect{A}=\vect{b}\times\vect{t},
+\qquad
+\vect{B}=(\vect{b}\mathbin{\cdot}\vect{n})(\vect{n}\times\vect{t}),
+\qquad
+\vect{D}=(\vect{b}\mathbin{\cdot}\vect{t})(\vect{n}\times\vect{t}).
+\label{eq:force-vectors}
+\end{equation}
+Define
+\begin{equation}
+C_j=\frac{\mu_j(1+\nu_j)}{1-2\nu_j}E_v,
+\qquad j\in\{1,2\}.
+\label{eq:force-material}
+\end{equation}
+The exact endpoint equations implemented at lines 270--283 are
+\begin{equation}
+\boxed{
+\vect{f}_i
+=-\frac{C_1a^3}{L}
+ \left(\vect{A}F_{03}^{(i)}
+      +\vect{B}F_{05}^{(i)}
+      +\vect{D}F_{15}^{(i)}\right)
+ +\frac{2C_2}{L}\vect{A}F_{\mathrm{SP}}^{(i)},
+\qquad i=1,2.
+}
+\label{eq:endpoint-force}
+\end{equation}
+Equivalently, this is the shape-function integral of the literal line-force
+density
+\begin{align}
+\vect{g}_{\mathrm{out}}(s)
+&=-C_1a^3\left[
+ \frac{\vect{b}\times\vect{t}}{\rho^3}
+ +3\frac{(\vect{b}\mathbin{\cdot}\vect{r})
+          (\vect{r}\times\vect{t})}{\rho^5}
+ \right],
+\label{eq:outside-density}\\
+\vect{g}_{\mathrm{in}}(s)
+&=2C_2(\vect{b}\times\vect{t}),
+\label{eq:inside-density}\\
+\vect{f}_i&=\int_{\mathcal O}N_i\vect{g}_{\mathrm{out}}\dd s
+            +\int_{\mathcal I}N_i\vect{g}_{\mathrm{in}}\dd s.
+\label{eq:nodal-integral}
+\end{align}
+Both nodal forces are perpendicular to \(\vect{t}\).
+
+Using the standard Peach--Koehler relation
+\(\vect{g}=(\vect{\sigma}\vect{b})\times\vect{t}\), the stress fields
+algebraically implied by this file are
+\begin{equation}
+\boxed{
+\vect{\sigma}_{\mathrm{out}}^{\mathrm{force\ file}}
+=-C_1a^3\left(\frac{\vect{I}}{\rho^3}
+              +3\frac{\vect{r}\vect{r}^{T}}{\rho^5}\right),
+\qquad
+\vect{\sigma}_{\mathrm{in}}^{\mathrm{force\ file}}=2C_2\vect{I}.
+}
+\label{eq:force-implied-stress}
+\end{equation}
+
+\section{Cross-file consistency and implementation cautions}
+
+This section records literal source behavior that is easy to miss when reading
+only the comments.
+
+\subsection{Direct-force and FMM fields are not the same kernel}
+
+The FMM monopole \eqref{eq:fmm-monopole} is
+\[
+\vect{\sigma}_{\mathrm{out}}^{\mathrm{FMM}}
+=+C_1a^3\left(\frac{\vect{I}}{\rho^3}
+              -3\frac{\vect{r}\vect{r}^T}{\rho^5}\right).
+\]
+The direct routine implies \eqref{eq:force-implied-stress}, which differs in
+the overall isotropic sign and in the relative sign of the radial term.  Its
+interior value also has the opposite sign from the disabled reference stress
+at \path{src/RemoteSegForces.cc}:290--335, which states
+\(-2C_1\vect{I}\).  The material-2 constants can intentionally alter the
+interior magnitude, but do not explain these sign differences.  Therefore
+near-field direct and far-field FMM inclusion forces are not algebraically
+consistent under the Peach--Koehler convention used by
+\path{src/RemoteSegForces.cc}:903--905.  A numerical regression test spanning
+the near/far cutoff is warranted before choosing which formula to change.
+
+\subsection{Translation discrepancies}
+
+Both translation functions obtain
+\(\vect{c}_{\mathrm{old}}-\vect{c}_{\mathrm{new}}\) from
+\code{EshelbyMakeEta}, while the moment definition and Taylor evaluation
+require \(\vect{c}_{\mathrm{new}}-\vect{c}_{\mathrm{old}}\).  This reverses
+all odd shift-degree contributions in M2M and L2L.  In addition:
+\begin{itemize}
+\item \path{src/EshelbyTranslateEta.cc}:268 has one wrong packed matrix index
+  in the \(x^2y^3\) coefficient;
+\item that function never frees its two temporary heap arrays;
+\item \path{src/EshelbyTranslateTaylor.cc}:51--55 fails to divide the final
+  \(z^t\) displacement monomial by \(t!\).
+\end{itemize}
+
+\subsection{Input and boundary assumptions}
+
+\begin{itemize}
+\item The FMM tables require nonnegative orders with \(p+t\leq6\), but the
+  individual functions generally rely on the global setup rather than checking
+  these bounds locally.
+\item \code{EshelbyDerofR} divides by \(r\), and \code{EshelbyForce} divides by
+  segment length \(L\); neither accepts a zero value.
+\item All factors containing \(1-2\nu\) assume \(\nu\neq1/2\).
+\item The direct-force routine replaces any ellipsoid by a sphere of maximum
+  semi-axis, whereas the FMM rejects unequal radii.
+\item Exact, strict intersection comparisons at
+  \path{src/EshelbyForce.cc}:209--235 make an endpoint exactly on the sphere a
+  delicate boundary case.  Certain ``boundary to interior'' configurations
+  fall into the final through-going branch and can create a reversed exterior
+  interval.
+\item The no-overlap condition uses bitwise \code{|} rather than logical
+  \code{||}.  Its truth value is the same for ordinary comparison results, but
+  it evaluates all three operands.
+\end{itemize}
+
+\section{Compact end-to-end equation summary}
+
+For a well-separated source cell and target cell, the nominal mathematical
+pipeline represented by the files can be summarized as
+\begin{align}
+M_\beta^{(s)}
+&=\sum_a E_{v,a}a_a^3
+  (\vect{c}_s-\vect{x}_a)^\beta,
+&&\text{P2M: \code{EshelbyMakeEta}},
+\label{eq:summary-p2m}\\
+M_\alpha^{(p)}
+&=\sum_{\beta\leq\alpha}\binom{\alpha}{\beta}
+  M_\beta^{(s)}
+  (\vect{c}_p-\vect{c}_s)^{\alpha-\beta},
+&&\text{M2M: intended recentering},
+\label{eq:summary-m2m}\\
+L_{ij,\alpha}
+&=A\sum_{\abs{\beta}\leq p}
+  D_{ij,\alpha+\beta}(\vect{c}_t-\vect{c}_s)
+  \frac{M_\beta}{\beta!},
+&&\text{M2L: \code{DerofR/BuildMatrix/MakeTaylor}},
+\label{eq:summary-m2l}\\
+L_{ij,\alpha}^{(c)}
+&=\sum_{\abs{\beta}\leq t-\abs{\alpha}}
+  L_{ij,\alpha+\beta}^{(p)}
+  \frac{(\vect{c}_c-\vect{c}_p)^\beta}{\beta!},
+&&\text{L2L: intended recentering},
+\label{eq:summary-l2l}\\
+\sigma_{ij}(\vect{x})
+&=\sum_{\abs{\alpha}\leq t}
+  L_{ij,\alpha}
+  \frac{(\vect{x}-\vect{c}_t)^\alpha}{\alpha!},
+&&\text{L2P: \code{EshelbyEvalTaylor}}.
+\label{eq:summary-l2p}
+\end{align}
+Equations \eqref{eq:summary-m2m} and \eqref{eq:summary-l2l} are the nominal
+recenterings.  The present translation sources use the negatives of the shown
+center displacements, as detailed in their respective sections.
+
+\appendix
+\section{Source-to-equation index}
+
+\small
+\begin{longtable}{@{}P{0.38\textwidth}P{0.22\textwidth}P{0.32\textwidth}@{}}
+\toprule
+File and lines & Main equations & Principal arrays/outputs \\
+\midrule
+\endhead
+\path{src/EshelbyBuildMatrix.cc}:40--87 &
+\eqref{eq:buildmatrix-size}, \eqref{eq:buildmatrix} &
+Rectangular row-major block \(B_{\alpha\beta}\). \\
+\path{src/EshelbyDerofR.cc}:22--856 &
+\eqref{eq:derofr-definition}--\eqref{eq:drlist-layout} &
+Packed ranks 2--8 in \code{drList}; monomial cache \code{xv}. \\
+\path{src/EshelbyEvalTaylor.cc}:24--100 &
+\eqref{eq:taylor-eval}, \eqref{eq:stress-unpack} &
+Symmetric \(3\times3\) \code{stressMatrix}. \\
+\path{src/EshelbyForce.cc}:31--103, 134--287 &
+\eqref{eq:line-parameterization}, \eqref{eq:wint},
+\eqref{eq:endpoint-force} &
+Five exterior integrals, two interior integrals, endpoint forces
+\code{f1}/\code{f2}. \\
+\path{src/EshelbyMakeEta.cc}:35--166 &
+\eqref{eq:makeeta-d}--\eqref{eq:cell-moment} &
+Raw moment/monomial vector \code{etav}. \\
+\path{src/EshelbyMakeTaylor.cc}:30--124 &
+\eqref{eq:m2l} &
+Packed local tensor \code{taylorSeries}. \\
+\path{src/EshelbyTranslateEta.cc}:27--649 &
+\eqref{eq:m2m-literal}, \eqref{eq:m2m-intended} &
+Translated moments \code{ep}; explicit ranks 0--6. \\
+\path{src/EshelbyTranslateTaylor.cc}:25--126 &
+\eqref{eq:l2l-block}--\eqref{eq:l2l-factor-bug} &
+Translated local tensor \code{tPrime}. \\
+\bottomrule
+\end{longtable}
+\normalsize
+
+\section{Notation quick reference}
+
+\begin{tabularx}{\textwidth}{@{}p{0.19\textwidth}Y@{}}
+\toprule
+Symbol & Meaning \\
+\midrule
+\(S_n=\binom{n+2}{3}\) & Start index of packed symmetric rank \(n\). \\
+\(I(\alpha)\) & Global packed index including ranks zero and one. \\
+\(J(\alpha)=I(\alpha)-4\) & Packed Taylor/derivative index, with ranks zero and one omitted. \\
+\(M_\alpha\) & Raw, unnormalized multipole moment. \\
+\(L_{ij,\alpha}\) & Local Taylor derivative coefficient. \\
+\(D_{i_1\ldots i_n}\) & \(-\partial_{i_1}\cdots\partial_{i_n}(1/r)\). \\
+\(A(\mu,\nu)\) & \(\mu(1+\nu)/(1-2\nu)\). \\
+\(E_v\) & Trace of the stored inclusion strain. \\
+\(a\) & Sphere radius; in the direct routine, maximum of the three radii. \\
+\(p,t\) & Multipole and Taylor truncation orders. \\
+\bottomrule
+\end{tabularx}
+
+\end{document}

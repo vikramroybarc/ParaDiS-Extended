@@ -1,0 +1,617 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,mathtools,bm}
+\usepackage{booktabs,tabularx,array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!55!black,
+  urlcolor=blue!55!black,
+  pdftitle={BCC nl Eshelby Hybrid Mobility Law}
+}
+
+\setcounter{tocdepth}{2}
+\setlist{nosep,leftmargin=*}
+\allowdisplaybreaks
+
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{P}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcommand{\vect}[1]{\bm{#1}}
+\newcommand{\norm}[1]{\left\lVert #1\right\rVert}
+\newcommand{\abs}[1]{\left\lvert #1\right\rvert}
+\newcommand{\dyad}[2]{#1\!\otimes\!#2}
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+\newcommand{\dd}{\,\mathrm{d}}
+
+\title{The \texttt{BCC\_nl\_Eshelby} Hybrid Mobility Law\\
+       Source Guide and Mathematical Formulation}
+\author{KGParadis source-level technical documentation}
+\date{Code snapshot reviewed 7 August 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+The mobility selector \code{BCC_nl_Eshelby} combines two existing BCC
+constitutive laws on each arm attached to a node.  Portions outside the union
+of Eshelby inclusions use the nonlinear screw and linear edge/junction model
+from \path{MobilityLaw_BCC_nl.cc}; portions inside use exactly the
+character-dependent drag tensor from \path{MobilityLaw_BCC_0.cc}.  This
+document derives the inclusion weight, both constitutive branches, their
+hybrid residual and Jacobian, and the corresponding source and build wiring.
+The implementation is a complete, independent translation unit; the original
+\path{MobilityLaw_BCC_nl.cc} is not modified.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Purpose and source layout}
+
+The public entry points are
+\begin{align*}
+ &\code{InitMob_BCC_nl_Eshelby(Home_t *)},\\
+ &\code{Mobility_BCC_nl_Eshelby(Home_t *,Node_t *,MobArgs_t *)}.
+\end{align*}
+They are implemented in
+\path{src/MobilityLaw_BCC_nl_Eshelby.cc}.  The control-file selector is
+\begin{center}
+\code{mobilityLaw = "BCC_nl_Eshelby"}.
+\end{center}
+The source is compiled only when \code{ESHELBY} is defined.  It contains its
+own copies of the private BCC nonlinear helpers and its own file-static
+constants \code{Linear}, \code{NonLinear}, and \code{V0}.  Its initializer
+must therefore compute those constants itself; calling \code{InitMob_BCC_nl}
+would initialize a different translation unit's private state.
+
+The implementation and registration are divided as follows.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}P{0.39\textwidth}Y@{}}
+\toprule
+File & Responsibility \\
+\midrule
+\path{src/MobilityLaw_BCC_nl_Eshelby.cc} &
+  Complete mobility implementation, inclusion interval union, BCC\_0 tensor,
+  hybrid Newton residual and Jacobian. \\
+\path{include/Mobility.h} &
+  Guarded enumeration, prototypes, and selector attributes. \\
+\path{src/DisableUnneededParams.cc} &
+  Retains the union of BCC\_nl, BCC\_0, pressure, and inclusion parameters in
+  restart/control output. \\
+\path{makefile.srcs} and \path{src/makefile.dep} &
+  Object registration and include dependencies. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{Arm geometry and notation}
+
+For an arm from the current node at \(\vect{x}_1\) to a neighboring node,
+the minimum-image segment vector and its length are
+\begin{equation}
+ \vect{r}=\operatorname{ZImage}(\vect{x}_2-\vect{x}_1),\qquad
+ L=\norm{\vect{r}},\qquad \vect{t}=\frac{\vect{r}}{L}.
+ \label{eq:arm}
+\end{equation}
+Let \(\vect{b}\) be the arm Burgers vector.  The BCC nonlinear decomposition
+uses the projected screw and edge lengths
+\begin{equation}
+ L_s=\frac{\abs{\vect{r}\mathbin{\cdot}\vect{b}}}{\norm{\vect{b}}},
+ \qquad
+ L_e=\sqrt{\max(0,L^2-L_s^2)}.
+ \label{eq:lengths}
+\end{equation}
+Every arm contribution has the usual nodal factor \(1/2\).  Vectors and
+tensors below are evaluated in the crystal frame used by the copied nonlinear
+solver; Section~\ref{sec:frames} describes frame conversion.
+
+The source classifies an arm as a product-zero or junction Burgers type when
+\begin{equation}
+ \abs{b_x b_y b_z}<10^{-12}.
+ \label{eq:junction-test}
+\end{equation}
+Other Burgers vectors use the regular BCC \(\langle111\rangle\) branch.
+
+\section{Eshelby coverage of an arm}
+
+\subsection{Ellipsoid intersection and periodic images}
+
+For an inclusion centered at \(\vect{C}\), with semi-axes
+\(a_1,a_2,a_3\) and orthonormal principal directions
+\(\vect{q}_1,\vect{q}_2,\vect{q}_3\), its interior is
+\begin{equation}
+ \sum_{k=1}^{3}
+ \left(\frac{\vect{q}_k\mathbin{\cdot}(\vect{x}-\vect{C})}{a_k}\right)^2
+ \leq 1.
+ \label{eq:ellipsoid}
+\end{equation}
+The code first moves \(\vect{C}\) to the periodic image nearest
+\(\vect{x}_1\).  It then intersects
+\begin{equation}
+ \vect{x}(s)=\vect{x}_1+s\vect{r},\qquad 0\leq s\leq1,
+ \label{eq:parametric-arm}
+\end{equation}
+with the ellipsoid by transforming it to a unit sphere.  Each intersected
+particle produces a clamped interval \([a_k,b_k]\subseteq[0,1]\).  Tangent or
+zero-width intervals are discarded.  The intervals are sorted and merged so
+overlapping inclusions are counted only once.  Denote their union by
+\(U\).
+
+\subsection{Nodal rather than geometric length fraction}
+
+The inside weight is not simply the covered length.  For the current endpoint
+the linear nodal shape function is \(N_1(s)=1-s\), so the normalized covered
+weight is
+\begin{equation}
+ \boxed{
+ \phi=2\int_U(1-s)\dd s
+ =\sum_{[a_k,b_k]\subset U}
+   \left[(1-a_k)^2-(1-b_k)^2\right] .}
+ \label{eq:phi}
+\end{equation}
+Thus \(0\leq\phi\leq1\), with \(\phi=0\) for an uncovered arm and
+\(\phi=1\) for a wholly covered arm.  Reversing the arm at its neighboring
+endpoint naturally changes the shape-function weight.  This is why the law
+does not perform a binary switch based only on whether the node position is
+inside a particle.
+
+If \code{inclusionFile} is empty, \code{enableInclusions} is false and the
+helper returns \(\phi=0\) without doing intersection work.
+
+\section{Outside law: original BCC nonlinear mobility}
+
+\subsection{Temperature- and pressure-dependent screw constants}
+
+Write
+\[
+ p=\code{MobExpP},\quad q=\code{MobExpQ},\quad
+ \alpha=\code{MobAlpha},\quad
+ H=\frac{\code{MobDeltaH0}}{k_B T},
+\]
+and let \(P_{\mathrm{GPa}}=P/10^9\).  The initializer computes
+\begin{align}
+ \mathcal{L}
+ &=A C_0\left(1-C\frac{T}{T_m}+D P_{\mathrm{GPa}}\right),
+ \label{eq:linear-constant}\\
+ y&=\alpha^p,\nonumber\\
+ \mathcal{N}
+ &=\frac{\mathcal{L}}
+ {\exp[-H(1-y)^q]\,[1+pqH(1-y)^{q-1}y]},
+ \label{eq:nonlinear-constant}\\
+ V_0&=\alpha\mathcal{L}
+      -\alpha\mathcal{N}\exp[-H(1-y)^q].
+ \label{eq:v0-constant}
+\end{align}
+Here \(A,C_0,C,D,T_m\) correspond to \code{MobCoeffA},
+\code{MobCoeffC0}, \code{MobCoeffC}, \code{MobCoeffD}, and
+\code{meltTemp}.  The per-Burgers-magnitude quantities used by the force law
+are
+\begin{equation}
+ M_L=\frac{\mathcal{L}}{b_{\rm mag}},\qquad
+ M_N=\frac{\mathcal{N}}{b_{\rm mag}},\qquad
+ v_0=\frac{V_0}{b_{\rm mag}}.
+ \label{eq:scaled-constants}
+\end{equation}
+
+For one screw Burgers family, define
+\begin{equation}
+ f_P=\code{MobPeierls}\,\norm{\vect{b}},\qquad
+ \omega=\frac{M_N}{f_P},\qquad
+ v_{\rm tr}=\alpha M_L-v_0.
+\end{equation}
+For \(0<v<v_{\rm tr}\), the scalar glide force \(f(v)\) is the numerical
+inverse of
+\begin{equation}
+ \boxed{v=\omega f
+ \exp\!\left[-H\left(1-(f/f_P)^p\right)^q\right].}
+ \label{eq:thermal-law}
+\end{equation}
+For \(v\geq v_{\rm tr}\), the continuation is linear,
+\begin{equation}
+ f(v)=\frac{(v+v_0)f_P}{M_L}.
+ \label{eq:high-speed-law}
+\end{equation}
+The source solves Equation~\eqref{eq:thermal-law} with its inherited Newton
+iterations and also returns \(f'(v)\).
+
+\subsection{Screw force and linear edge/junction tensors}
+
+Let \(\widehat{\vect{b}}=\vect{b}/\norm{\vect{b}}\),
+\(P_b=I-\dyad{\widehat{\vect{b}}}{\widehat{\vect{b}}}\), and
+\begin{equation}
+ \vect{v}_{\perp}=P_b\vect{v},\qquad
+ v_{\perp}=\norm{\vect{v}_{\perp}},\qquad
+ \widehat{\vect{v}}_{\perp}=\vect{v}_{\perp}/v_{\perp}.
+\end{equation}
+The nonlinear screw force per unit screw length is
+\begin{equation}
+ \vect{F}_s(\vect{v};\vect{b})
+ =B_l\dyad{\widehat{\vect{b}}}{\widehat{\vect{b}}}\vect{v}
+  +f(v_{\perp})\widehat{\vect{v}}_{\perp},
+ \qquad B_l=\frac{1}{\code{MobLine}}.
+ \label{eq:screw-force}
+\end{equation}
+Away from \(v_{\perp}=0\), its derivative is
+\begin{equation}
+ D_s=B_l\dyad{\widehat{\vect{b}}}{\widehat{\vect{b}}}
+ +f'(v_{\perp})
+   \dyad{\widehat{\vect{v}}_{\perp}}{\widehat{\vect{v}}_{\perp}}
+ +\frac{f(v_{\perp})}{v_{\perp}}
+  \left(P_b-
+   \dyad{\widehat{\vect{v}}_{\perp}}{\widehat{\vect{v}}_{\perp}}
+  \right).
+ \label{eq:screw-jacobian}
+\end{equation}
+The implementation uses the finite zero-velocity limit of this expression.
+
+For a regular arm, set
+\(\vect{n}=(\vect{b}\times\vect{t})/
+\norm{\vect{b}\times\vect{t}}\) and use the orthogonal line direction
+\(\vect{t}\) up to an irrelevant sign.  Its linear edge tensor is
+\begin{equation}
+ D_e=B_g\dyad{\widehat{\vect{b}}}{\widehat{\vect{b}}}
+     +B_c\dyad{\vect{n}}{\vect{n}}
+     +B_l\dyad{\vect{t}}{\vect{t}},
+ \quad
+ B_g=\frac1{\code{MobGlide}},\quad
+ B_c=\frac1{\code{MobClimb}}.
+ \label{eq:edge-tensor}
+\end{equation}
+For a product-zero/junction arm, the whole arm uses
+\begin{equation}
+ D_j=B_c(I-\dyad{\vect{t}}{\vect{t}})
+     +B_l\dyad{\vect{t}}{\vect{t}}.
+ \label{eq:junction-tensor}
+\end{equation}
+
+\section{Inside law: exact BCC\_0 arm tensor}
+
+The inside portion does not use a scalar Eshelby resistance multiplier.  It
+uses the character-dependent tensor from \path{MobilityLaw_BCC_0.cc}.  Define
+\begin{equation}
+ B_s=\frac1{\code{MobScrew}},\qquad
+ B_e=\frac1{\code{MobEdge}},\qquad
+ B_{ec}=\frac1{\code{MobClimb}},\qquad
+ B_{l0}=10^{-2}\min(B_s,B_e),
+ \label{eq:bcc0-coeffs}
+\end{equation}
+and
+\begin{equation}
+ c^2=\frac{(\vect{t}\mathbin{\cdot}\vect{b})^2}{\norm{\vect{b}}^2}.
+ \label{eq:character}
+\end{equation}
+
+For a product-zero Burgers vector, Equation~\eqref{eq:junction-test}, the
+BCC\_0 tensor is
+\begin{equation}
+ \boxed{B^0=B_{ec}I+(B_{l0}-B_{ec})
+ \dyad{\vect{t}}{\vect{t}}.}
+ \label{eq:bcc0-special}
+\end{equation}
+For a regular near-screw arm, \(1-c^2\leq10^{-12}\), it is
+\begin{equation}
+ \boxed{B^0=B_sI+(B_{l0}-B_s)\dyad{\vect{t}}{\vect{t}}.}
+ \label{eq:bcc0-screw}
+\end{equation}
+
+For a mixed regular arm, form the orthonormal directions
+\begin{equation}
+ \vect{n}=\frac{\vect{b}\times\vect{t}}
+ {\sqrt{(1-c^2)\norm{\vect{b}}^2}},
+ \qquad \vect{m}=\vect{n}\times\vect{t},
+ \label{eq:bcc0-basis}
+\end{equation}
+and the interpolated glide and climb drags
+\begin{align}
+ B_g^0&=\left[B_e^{-2}+(B_s^{-2}-B_e^{-2})c^2\right]^{-1/2},
+ \label{eq:bcc0-glide}\\
+ B_c^0&=\left[B_{ec}^{2}+(B_s^{2}-B_{ec}^{2})c^2\right]^{1/2}.
+ \label{eq:bcc0-climb}
+\end{align}
+The tensor assembled by the source is equivalently
+\begin{equation}
+ \boxed{B^0=B_{l0}\dyad{\vect{t}}{\vect{t}}
+             +B_c^0\dyad{\vect{n}}{\vect{n}}
+             +B_g^0\dyad{\vect{m}}{\vect{m}}.}
+ \label{eq:bcc0-mixed}
+\end{equation}
+At pure edge character, \(c^2=0\), this reduces to line, climb, and edge
+drags \(B_{l0},B_{ec},B_e\) along \(\vect{t},\vect{n},\vect{m}\).
+
+\section{Hybrid residual and Jacobian}
+
+For a regular arm \(i\), the drag-force contribution assigned to the current
+node is
+\begin{equation}
+ \boxed{
+ \vect{R}_i^{\rm drag}=
+ \frac12(1-\phi_i)
+ \left[L_{e,i}D_{e,i}\vect{v}
+       +L_{s,i}\vect{F}_s(\vect{v};\vect{b}_i)\right]
+ +\frac12\phi_iL_iB_i^0\vect{v}.}
+ \label{eq:hybrid-regular}
+\end{equation}
+For a product-zero/junction arm it is
+\begin{equation}
+ \boxed{
+ \vect{R}_i^{\rm drag}=
+ \frac12L_i\left[(1-\phi_i)D_{j,i}+\phi_iB_i^0\right]\vect{v}.}
+ \label{eq:hybrid-junction}
+\end{equation}
+Notice that the BCC\_0 part owns the full physical arm length \(L_i\); it is
+not decomposed into \(L_s\) and \(L_e\).
+
+Collinear screw Burgers vectors are grouped.  Define
+\begin{equation}
+ C_g=\frac12\sum_{i\in g}(1-\phi_i)L_{s,i}
+ \label{eq:screw-group}
+\end{equation}
+and let \(D_{\rm lin}\) contain all edge/junction terms plus all inside
+BCC\_0 tensors.  The Newton solve uses the force residual
+\begin{equation}
+ \boxed{
+ \vect{r}(\vect{v})=\vect{F}_{\rm node}
+ -D_{\rm lin}\vect{v}
+ -\sum_g C_g\vect{F}_s(\vect{v};\vect{b}_g)=\vect{0},}
+ \label{eq:residual}
+\end{equation}
+with Jacobian
+\begin{equation}
+ \boxed{
+ J(\vect{v})=-D_{\rm lin}-\sum_g C_gD_s(\vect{v};\vect{b}_g).}
+ \label{eq:jacobian}
+\end{equation}
+The iteration applies \(\vect{v}\leftarrow\vect{v}-J^{-1}\vect{r}\), using
+the convergence and correction controls inherited from BCC\_nl.
+
+The original BCC\_nl one-screw shortcut solves only a two-dimensional
+nonlinear subspace and restores the Burgers-direction velocity analytically.
+A mixed BCC\_0 tensor need not have \(\vect{b}\) as an eigenvector.  Therefore
+the new implementation disables that shortcut whenever any arm has
+\(\phi_i>0\), and uses the full three-dimensional Newton system instead.
+
+\section{Frames, outputs, and limiting cases}
+\label{sec:frames}
+
+Intersection geometry is evaluated in the simulation/laboratory frame:
+the minimum-image arm \(\vect{r}_{\rm lab}\), node position, and nearest
+periodic inclusion center are passed to the ellipsoid routine.  A saved copy
+of \(\vect{r}_{\rm lab}\) isolates this calculation from crystallographic
+rotation.
+
+When \code{useLabFrame} is enabled, force, velocity, arm direction, and Burgers
+vector are rotated with \code{rotMatrixInverse}; all drag tensors and the
+Newton solve are then evaluated in the crystal frame.  The converged velocity
+is rotated back with \code{rotMatrix}.  For an orthogonal rotation \(Q\), this
+is the covariance relation
+\begin{equation}
+ B^0_{\rm crystal}=Q^TB^0_{\rm lab}Q.
+\end{equation}
+
+The important limits are:
+\begin{align}
+ \phi_i=0\ \forall i
+ &\quad\Longrightarrow\quad
+ \text{the copied BCC\_nl algebra and execution path},
+ \label{eq:limit-out}\\
+ \phi_i=1\ \forall i
+ &\quad\Longrightarrow\quad
+ D_{\rm lin}=\sum_i\frac12L_iB_i^0,\qquad C_g=0.
+ \label{eq:limit-in}
+\end{align}
+Thus complete coverage gives the same nodal velocity as
+\code{Mobility_BCC_0} when \code{includeInertia=0}.  The nonlinear parent law
+does not contain BCC\_0's optional mass term, so inertial parity is not claimed
+when \code{includeInertia=1}.
+
+The \code{mobArgs->invDragMatrix} output intentionally follows the inherited
+BCC\_nl convention: it is an inverse of the negative Newton Jacobian in the
+solver frame.  Even at complete coverage, it is not the positive lab-frame
+\(B^{-1}\) stored by \code{Mobility_BCC_0}; the nodal velocity is nevertheless
+the BCC\_0 velocity under the non-inertial condition above.
+
+\section{Parameters and control-file use}
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}P{0.29\textwidth}P{0.25\textwidth}Y@{}}
+\toprule
+Parameter group & Used by & Meaning \\
+\midrule
+\code{inclusionFile} & Geometry & Inclusion centers, radii, orientations, and
+candidate intersection data. \\
+\code{MobScrew}, \code{MobEdge}, \code{MobClimb} & BCC\_0 inside & Mobilities
+whose reciprocals define Equation~\eqref{eq:bcc0-coeffs}. \\
+\code{MobGlide}, \code{MobLine}, \code{MobClimb} & BCC\_nl outside & Linear
+edge, line, and climb drags. \\
+\code{MobPeierls}, \code{MobExpP}, \code{MobExpQ}, \code{MobAlpha},
+\code{MobDeltaH0} & BCC\_nl outside & Thermally activated screw law. \\
+\code{MobCoeffA}, \code{MobCoeffC0}, \code{MobCoeffC}, \code{MobCoeffD},
+\code{meltTemp}, \code{TempK}, \code{pressure} & BCC\_nl outside & Initializer
+constants in Equations~\eqref{eq:linear-constant}--\eqref{eq:v0-constant}. \\
+\code{MobFileNL}, \code{ecFile}, \code{meltTempFile} & Existing nonlinear
+initialization paths & Optional table/file inputs retained consistently with
+BCC\_nl. \\
+\code{MobEshelbyResist} & Not used & Deliberately disabled for this selector;
+the inside branch is the literal BCC\_0 tensor, not a scalar-rescaled outside
+law. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The following is a ready-to-use control-file example based on
+\path{tests/screwEsh.ctrl}.  It includes the simulation controls needed by that
+test as well as the complete parameter union used by the hybrid law.  The
+material constants shown are the existing tantalum defaults in
+\path{src/Param.cc}; they should be replaced by the calibration for the
+material being simulated.
+
+\subsection{Complete example control input}
+
+\begin{verbatim}
+dirname = "tests/screwEsh_nl_Eshelby_results"
+inclusionFile = "tests/screwEsh.dat"
+
+# Domain and cell geometry
+numXdoms = 1
+numYdoms = 1
+numZdoms = 1
+numXcells = 3
+numYcells = 3
+numZcells = 3
+
+# Discretization and topological changes
+maxSeg = 50
+minSeg = 15
+remeshRule = 2
+enforceGlidePlanes = 0
+enableCrossSlip = 0
+splitMultiNodeFreq = 5
+
+# Time integration
+maxstep = 1000000
+timestepIntegrator = "trapezoid"
+nextDT = 1.0e-12
+rTol = 0.5
+
+# Fast multipole controls
+fmEnabled = 0
+fmMPOrder = 2
+fmTaylorOrder = 5
+
+# Loading and thermodynamic state
+loadType = 1
+eRate = 1.0e5
+indxErate = 2
+edotdir = [
+  0.0
+  0.0
+  1.0
+]
+TempK = 600.0
+pressure = 0.0
+
+# Select the hybrid law
+mobilityLaw = "BCC_nl_Eshelby"
+materialTypeName = "BCC"
+
+# Elastic and core parameters used by the simulation
+shearModulus = 8.600000e10
+pois = 2.910000e-1
+burgMag = 2.480000e-10
+YoungModulus = 2.220520e11
+rc = 2.0
+rann = 5.0
+collisionMethod = 3
+
+# BCC_0 mobility used on inclusion-covered arm portions
+MobScrew = 1.0e2
+MobEdge  = 1.0e2
+MobClimb = 1.0e-5
+
+# BCC_nl mobility used on uncovered arm portions
+MobGlide = 1.0e2
+MobLine = 1.0e4
+MobPeierls = 3.240000e8
+MobDeltaH0 = 1.728748e-19
+MobAlpha = 9.661236e-1
+MobExpP = 0.5
+MobExpQ = 1.23
+MobCoeffA = 1.525
+MobCoeffC = 2.032370e-1
+MobCoeffC0 = 2.048000e3
+MobCoeffD = 1.626950e-4
+meltTemp = 3.170683e3
+
+# Optional nonlinear-property files; empty uses values above
+MobFileNL = ""
+ecFile = ""
+meltTempFile = ""
+
+# Output controls
+fluxfile = 1
+fluxfreq = 200
+savecn = 1
+savecnfreq = 200
+saveprop = 1
+savepropfreq = 200
+savetimers = 0
+velfile = 0
+velfilefreq = 200
+\end{verbatim}
+
+The associated nodal data and particle file for this example are
+\path{tests/screwEsh.data} and \path{tests/screwEsh.dat}.  A one-step serial
+smoke run can be launched as
+\begin{verbatim}
+bin/paradis -maxstep 1 -s -d tests/screwEsh.data \
+  path/to/BCC_nl_Eshelby.ctrl
+\end{verbatim}
+
+\subsection{Inputs specific to the hybrid switch}
+
+Only three changes are required when converting an existing BCC\_nl control
+file:
+\begin{enumerate}
+ \item set \code{mobilityLaw = "BCC_nl_Eshelby"};
+ \item provide a nonempty \code{inclusionFile};
+ \item provide positive \code{MobScrew} and \code{MobEdge} values for the
+       BCC\_0 inside tensor.  \code{MobClimb} is already required by BCC\_nl
+       and is shared by both branches.
+\end{enumerate}
+\code{MobEshelbyResist} is not used by this selector and should be omitted.
+
+An empty \code{inclusionFile} is permitted; it makes the law reduce to
+BCC\_nl everywhere.
+
+\section{Build and verification}
+
+The selector, prototypes, and implementation are guarded by \code{ESHELBY}.
+The object remains in the common source list, like the other Eshelby mobility
+objects; without \code{ESHELBY} it compiles to an empty translation unit and
+the selector is absent.  No changes are required in \path{Param.cc},
+\path{Param.h}, or \path{Initialize.cc}, because mobility selection and
+function-pointer initialization are generic.
+
+The implementation was checked in the following ways:
+\begin{itemize}
+ \item full serial builds with and without \code{ESHELBY};
+ \item a one-step ParaDiS run using \code{BCC_nl_Eshelby} and an inclusion
+       file;
+ \item symbolic comparison of every BCC\_0 tensor branch with
+       \path{MobilityLaw_BCC_0.cc};
+ \item \(10^5\) randomized orientations over wide mobility ranges, with only
+       floating-point ordering differences (approximately \(10^{-12}\) at
+       deliberately extreme ranges and near machine precision ordinarily);
+ \item direct checks of overlapping, tangent, disjoint, and fully contained
+       inclusion intervals;
+ \item algebraic checks of the \(\phi=0\) and \(\phi=1\) limits.
+\end{itemize}
+
+\section{Implementation cautions}
+
+\begin{enumerate}
+ \item ``Inside'' is arm- and endpoint-weighted through Equation~\eqref{eq:phi};
+       a node center inside an inclusion does not imply that all its arms have
+       \(\phi=1\).
+ \item The three BCC\_0 input mobilities must be finite and positive because
+       the source uses their reciprocals.
+ \item Complete BCC\_0 equivalence assumes \code{includeInertia=0}.
+ \item \code{MobEshelbyResist} has no effect on this law by design.
+ \item The outside-only branch deliberately retains the numerical behavior of
+       the original BCC\_nl implementation.  Baseline solver changes should be
+       made separately in both laws if that behavior is later revised.
+\end{enumerate}
+
+\end{document}
