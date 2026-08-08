@@ -221,10 +221,16 @@ void DisableUnneededParams(Home_t *home)
                 break;
 #ifdef ESHELBY
             case MOB_BCC_NL_ESHELBY:
-                MarkParamEnabled(home->ctrlParamList, "MobScrew");
-                MarkParamEnabled(home->ctrlParamList, "MobEdge");
+            case MOB_BCC_NL_ESHELBY_RESIST:
+                if (param->mobilityType == MOB_BCC_NL_ESHELBY) {
+                    MarkParamEnabled(home->ctrlParamList, "MobScrew");
+                    MarkParamEnabled(home->ctrlParamList, "MobEdge");
+                } else {
+                    MarkParamEnabled(home->ctrlParamList,
+                                     "MobEshelbyResist");
+                }
                 MarkParamEnabled(home->ctrlParamList, "pressure");
-                /* fall through: this variant uses all BCC_nl parameters */
+                /* fall through: both variants use all BCC_nl parameters */
 #endif
             case MOB_BCC_NL:
                 MarkParamEnabled(home->ctrlParamList, "MobExpP");
@@ -335,7 +341,8 @@ void DisableUnneededParams(Home_t *home)
 
 #ifdef ESHELBY
             MarkParamDisabled(home->ctrlParamList, "eshelbyfmEnabled");
-            if (param->mobilityType != MOB_BCC_NL_ESHELBY) {
+            if ((param->mobilityType != MOB_BCC_NL_ESHELBY) &&
+                (param->mobilityType != MOB_BCC_NL_ESHELBY_RESIST)) {
                 MarkParamDisabled(home->ctrlParamList, "inclusionFile");
             }
             MarkParamDisabled(home->ctrlParamList, "eshelbyfmMPOrder");

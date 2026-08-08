@@ -501,6 +501,10 @@ $(OBJDIR)/MobilityLaw_BCC_nl_Eshelby.o: $(INCDIR)/mpi_portability.h $(INCDIR)/Ho
 $(OBJDIR)/MobilityLaw_BCC_nl_Eshelby.o: $(INCDIR)/Tag.h $(INCDIR)/FM.h $(INCDIR)/Node.h $(INCDIR)/Thread.h $(INCDIR)/NodeBlock.h $(INCDIR)/Param.h $(INCDIR)/Parse.h $(INCDIR)/Mobility.h $(INCDIR)/MatType_t.h
 $(OBJDIR)/MobilityLaw_BCC_nl_Eshelby.o: $(INCDIR)/Cell.h $(INCDIR)/TagMap.h $(INCDIR)/RemoteDomain.h $(INCDIR)/MirrorDomain.h $(INCDIR)/Topology.h $(INCDIR)/OpList.h $(INCDIR)/Timer.h $(INCDIR)/Util.h
 $(OBJDIR)/MobilityLaw_BCC_nl_Eshelby.o: $(INCDIR)/Init.h $(INCDIR)/InData.h $(INCDIR)/Matrix.h $(INCDIR)/DebugFunctions.h $(INCDIR)/Force.h $(INCDIR)/Segment.h $(INCDIR)/PBC.h $(INCDIR)/SegmentPair.h
+$(OBJDIR)/MobilityLaw_BCC_nl_Eshelby_SegmentResist.o: $(INCDIR)/mpi_portability.h $(INCDIR)/Home.h $(INCDIR)/cuda_portability.h $(INCDIR)/Constants.h $(INCDIR)/ParadisThread.h $(INCDIR)/Typedefs.h $(INCDIR)/ParadisProto.h
+$(OBJDIR)/MobilityLaw_BCC_nl_Eshelby_SegmentResist.o: $(INCDIR)/Tag.h $(INCDIR)/FM.h $(INCDIR)/Node.h $(INCDIR)/Thread.h $(INCDIR)/NodeBlock.h $(INCDIR)/Param.h $(INCDIR)/Parse.h $(INCDIR)/Mobility.h $(INCDIR)/MatType_t.h
+$(OBJDIR)/MobilityLaw_BCC_nl_Eshelby_SegmentResist.o: $(INCDIR)/Cell.h $(INCDIR)/TagMap.h $(INCDIR)/RemoteDomain.h $(INCDIR)/MirrorDomain.h $(INCDIR)/Topology.h $(INCDIR)/OpList.h $(INCDIR)/Timer.h $(INCDIR)/Util.h
+$(OBJDIR)/MobilityLaw_BCC_nl_Eshelby_SegmentResist.o: $(INCDIR)/Init.h $(INCDIR)/InData.h $(INCDIR)/Matrix.h $(INCDIR)/DebugFunctions.h $(INCDIR)/Force.h $(INCDIR)/Segment.h $(INCDIR)/PBC.h $(INCDIR)/SegmentPair.h
 $(OBJDIR)/MobilityLaw_FCC_0.o: $(INCDIR)/mpi_portability.h $(INCDIR)/Home.h $(INCDIR)/cuda_portability.h $(INCDIR)/Constants.h $(INCDIR)/ParadisThread.h $(INCDIR)/Typedefs.h $(INCDIR)/ParadisProto.h
 $(OBJDIR)/MobilityLaw_FCC_0.o: $(INCDIR)/Tag.h $(INCDIR)/FM.h $(INCDIR)/Node.h $(INCDIR)/Thread.h $(INCDIR)/NodeBlock.h $(INCDIR)/Param.h $(INCDIR)/Parse.h $(INCDIR)/Mobility.h $(INCDIR)/MatType_t.h
 $(OBJDIR)/MobilityLaw_FCC_0.o: $(INCDIR)/Cell.h $(INCDIR)/TagMap.h $(INCDIR)/RemoteDomain.h $(INCDIR)/MirrorDomain.h $(INCDIR)/Topology.h $(INCDIR)/OpList.h $(INCDIR)/Timer.h $(INCDIR)/Util.h
