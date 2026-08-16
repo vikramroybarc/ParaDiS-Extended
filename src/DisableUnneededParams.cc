@@ -154,6 +154,12 @@ void DisableUnneededParams(Home_t *home)
                 MarkParamEnabled(home->ctrlParamList, "HCP_LineDrag");
                 break;
 #ifdef ESHELBY
+            case MOB_BCC_0B_ESHELBY:
+                MarkParamEnabled(home->ctrlParamList, "MobScrew");
+                MarkParamEnabled(home->ctrlParamList, "MobEdge");
+                MarkParamEnabled(home->ctrlParamList, "MobClimb");
+                MarkParamEnabled(home->ctrlParamList, "MobEshelbyResist");
+                break;
             case MOB_FCC_0B_ESHELBY:
             case MOB_BCC_0_ESHELBY:
                 MarkParamEnabled(home->ctrlParamList, "MobScrew");
@@ -342,7 +348,8 @@ void DisableUnneededParams(Home_t *home)
 #ifdef ESHELBY
             MarkParamDisabled(home->ctrlParamList, "eshelbyfmEnabled");
             if ((param->mobilityType != MOB_BCC_NL_ESHELBY) &&
-                (param->mobilityType != MOB_BCC_NL_ESHELBY_RESIST)) {
+                (param->mobilityType != MOB_BCC_NL_ESHELBY_RESIST) &&
+                (param->mobilityType != MOB_BCC_0B_ESHELBY)) {
                 MarkParamDisabled(home->ctrlParamList, "inclusionFile");
             }
             MarkParamDisabled(home->ctrlParamList, "eshelbyfmMPOrder");
@@ -362,6 +369,14 @@ void DisableUnneededParams(Home_t *home)
  *      Not all of the timestep integrator parameters are used in
  *      all the integrator functions...
  */
+        if (!StrEquiv(param->timestepIntegrator, "subcycling")) {
+            MarkParamDisabled(home->ctrlParamList, "subcyclingNumGroups");
+            MarkParamDisabled(home->ctrlParamList, "subcyclingRadii");
+            MarkParamDisabled(home->ctrlParamList, "subcyclingRtolThreshold");
+            MarkParamDisabled(home->ctrlParamList, "subcyclingRtolRelative");
+            MarkParamDisabled(home->ctrlParamList, "subcyclingNextDT");
+        }
+
         if (StrEquiv(param->timestepIntegrator, "forward-euler"))
         {
             MarkParamDisabled(home->ctrlParamList, "trapezoidMaxIterations");
@@ -433,6 +448,26 @@ void DisableUnneededParams(Home_t *home)
                 MarkParamDisabled(home->ctrlParamList, "KINSOL_EtaVal");
             }
 
+        }
+        else if (StrEquiv(param->timestepIntegrator, "subcycling"))
+        {
+            MarkParamDisabled(home->ctrlParamList, "rmax");
+            MarkParamDisabled(home->ctrlParamList, "trapezoidMaxIterations");
+            MarkParamDisabled(home->ctrlParamList, "KINSOL_MaxIterations");
+            MarkParamDisabled(home->ctrlParamList, "KINSOL_MaxLinIterations");
+            MarkParamDisabled(home->ctrlParamList, "KINSOL_NumPriorResiduals");
+            MarkParamDisabled(home->ctrlParamList, "KINSOL_PrintLevel");
+            MarkParamDisabled(home->ctrlParamList, "KINSOL_LogFile");
+            MarkParamDisabled(home->ctrlParamList, "KINSOL_EtaVal");
+            MarkParamDisabled(home->ctrlParamList, "ARKODE_IRKtable");
+            MarkParamDisabled(home->ctrlParamList, "ARKODE_FPsolver");
+            MarkParamDisabled(home->ctrlParamList, "ARKODE_MaxNonLinIters");
+            MarkParamDisabled(home->ctrlParamList, "ARKODE_MaxLinIters");
+            MarkParamDisabled(home->ctrlParamList, "ARKODE_FPaccel");
+            MarkParamDisabled(home->ctrlParamList, "ARKODE_PredictorMethod");
+            MarkParamDisabled(home->ctrlParamList, "ARKODE_AdaptivityMethod");
+            MarkParamDisabled(home->ctrlParamList, "ARKODE_NonLinCoef");
+            MarkParamDisabled(home->ctrlParamList, "ARKODE_LinCoef");
         }
         else if (StrEquiv(param->timestepIntegrator, "ARKODE"))
         {

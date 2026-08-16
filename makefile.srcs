@@ -230,6 +230,7 @@ PARADIS_OBJS = \
    $(OBJDIR)/StressDueToSeg.o                          \
    $(OBJDIR)/StressDueToSegAnisotropic.o               \
    $(OBJDIR)/String_t.o                                \
+   $(OBJDIR)/SubcyclingIntegrator.o                    \
    $(OBJDIR)/TAYLOR_FMCorrectionTable.o                \
    $(OBJDIR)/TAYLOR_FMFunctions.o                      \
    $(OBJDIR)/Ta_Util.o                                 \

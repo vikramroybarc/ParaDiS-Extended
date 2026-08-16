@@ -28,6 +28,7 @@
 #include "mpi_portability.h"
 
 #include "Home.h"
+#include "Subcycling.h"
 #include "Util.h"
 #include "Mobility.h"
 #include "V3.h"
@@ -758,6 +759,7 @@ void NodeForce(Home_t *home, int reqType)
  *      do any remote force calcs... unless the FEM code is hooked in,
  *      in which case we still need to factor in some Yoffe stress?
  */
+        if (SubcyclingUseBaseForces(home)) {
 #ifndef FULL_N2_FORCES
 #ifdef SPECTRAL
         if ( (param->fmEnabled==0) && (param->FFTenabled==0) )
@@ -768,6 +770,7 @@ void NodeForce(Home_t *home, int reqType)
             ComputeSegSigbRem(home, reqType);
         }
 #endif
+        }
 
         TimerStop(home, REMOTE_FORCE);
 
@@ -783,6 +786,7 @@ void NodeForce(Home_t *home, int reqType)
  */
         TimerStart    (home, LOCAL_FORCE);
         LocalSegForces(home, reqType);
+        SubcyclingAddCachedForces(home);
         TimerStop     (home, LOCAL_FORCE);
 
 #ifdef ESHELBY

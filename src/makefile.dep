@@ -412,7 +412,7 @@ $(OBJDIR)/LocalSegForces.o: $(INCDIR)/mpi_portability.h $(INCDIR)/Home.h $(INCDI
 $(OBJDIR)/LocalSegForces.o: $(INCDIR)/Tag.h $(INCDIR)/FM.h $(INCDIR)/Node.h $(INCDIR)/Thread.h $(INCDIR)/NodeBlock.h $(INCDIR)/Param.h $(INCDIR)/Parse.h $(INCDIR)/Mobility.h $(INCDIR)/MatType_t.h
 $(OBJDIR)/LocalSegForces.o: $(INCDIR)/Cell.h $(INCDIR)/TagMap.h $(INCDIR)/RemoteDomain.h $(INCDIR)/MirrorDomain.h $(INCDIR)/Topology.h $(INCDIR)/OpList.h $(INCDIR)/Timer.h $(INCDIR)/Util.h
 $(OBJDIR)/LocalSegForces.o: $(INCDIR)/Init.h $(INCDIR)/InData.h $(INCDIR)/Matrix.h $(INCDIR)/DebugFunctions.h $(INCDIR)/Force.h $(INCDIR)/Segment.h $(INCDIR)/PBC.h $(INCDIR)/SegmentPair.h
-$(OBJDIR)/LocalSegForces.o: $(INCDIR)/Comm.h $(INCDIR)/ComputeForces.h $(INCDIR)/V3.h $(INCDIR)/SegmentPairList.h $(INCDIR)/NativeSeg.h $(INCDIR)/Moment.h $(INCDIR)/SSF_Driver.h
+$(OBJDIR)/LocalSegForces.o: $(INCDIR)/Comm.h $(INCDIR)/ComputeForces.h $(INCDIR)/V3.h $(INCDIR)/SegmentPairList.h $(INCDIR)/NativeSeg.h $(INCDIR)/Moment.h $(INCDIR)/SSF_Driver.h $(INCDIR)/Subcycling.h
 $(OBJDIR)/LocalSegForces.o: $(INCDIR)/AnisotropicVars_t.h $(INCDIR)/Complex_t.h $(INCDIR)/SSF_FV_t.h $(INCDIR)/SSF_PV_t.h $(INCDIR)/SSF_Node_t.h
 $(OBJDIR)/M22.o: $(INCDIR)/M22.h $(INCDIR)/Typedefs.h $(INCDIR)/Constants.h
 $(OBJDIR)/M33.o: $(INCDIR)/V3.h $(INCDIR)/Typedefs.h $(INCDIR)/Constants.h $(INCDIR)/M33.h
@@ -620,7 +620,7 @@ $(OBJDIR)/NodeBlock.o: $(INCDIR)/InData.h $(INCDIR)/Matrix.h $(INCDIR)/DebugFunc
 $(OBJDIR)/NodeForce.o: $(INCDIR)/mpi_portability.h $(INCDIR)/Home.h $(INCDIR)/cuda_portability.h $(INCDIR)/Constants.h $(INCDIR)/ParadisThread.h $(INCDIR)/Typedefs.h $(INCDIR)/ParadisProto.h
 $(OBJDIR)/NodeForce.o: $(INCDIR)/Tag.h $(INCDIR)/FM.h $(INCDIR)/Node.h $(INCDIR)/Thread.h $(INCDIR)/NodeBlock.h $(INCDIR)/Param.h $(INCDIR)/Parse.h $(INCDIR)/Mobility.h $(INCDIR)/MatType_t.h
 $(OBJDIR)/NodeForce.o: $(INCDIR)/Cell.h $(INCDIR)/TagMap.h $(INCDIR)/RemoteDomain.h $(INCDIR)/MirrorDomain.h $(INCDIR)/Topology.h $(INCDIR)/OpList.h $(INCDIR)/Timer.h $(INCDIR)/Util.h $(INCDIR)/Init.h
-$(OBJDIR)/NodeForce.o: $(INCDIR)/InData.h $(INCDIR)/Matrix.h $(INCDIR)/DebugFunctions.h $(INCDIR)/Force.h $(INCDIR)/Segment.h $(INCDIR)/PBC.h $(INCDIR)/SegmentPair.h $(INCDIR)/V3.h
+$(OBJDIR)/NodeForce.o: $(INCDIR)/InData.h $(INCDIR)/Matrix.h $(INCDIR)/DebugFunctions.h $(INCDIR)/Force.h $(INCDIR)/Segment.h $(INCDIR)/PBC.h $(INCDIR)/SegmentPair.h $(INCDIR)/V3.h $(INCDIR)/Subcycling.h
 $(OBJDIR)/NodeTaskGroup.o: $(INCDIR)/mpi_portability.h $(INCDIR)/Home.h $(INCDIR)/cuda_portability.h $(INCDIR)/Constants.h $(INCDIR)/ParadisThread.h $(INCDIR)/Typedefs.h $(INCDIR)/ParadisProto.h
 $(OBJDIR)/NodeTaskGroup.o: $(INCDIR)/Tag.h $(INCDIR)/FM.h $(INCDIR)/Node.h $(INCDIR)/Thread.h $(INCDIR)/NodeBlock.h $(INCDIR)/Param.h $(INCDIR)/Parse.h $(INCDIR)/Mobility.h $(INCDIR)/MatType_t.h
 $(OBJDIR)/NodeTaskGroup.o: $(INCDIR)/Cell.h $(INCDIR)/TagMap.h $(INCDIR)/RemoteDomain.h $(INCDIR)/MirrorDomain.h $(INCDIR)/Topology.h $(INCDIR)/OpList.h $(INCDIR)/Timer.h $(INCDIR)/Util.h
@@ -929,6 +929,11 @@ $(OBJDIR)/StressDueToSemiInfSegIsotropic.o: $(INCDIR)/Mobility.h $(INCDIR)/MatTy
 $(OBJDIR)/StressDueToSemiInfSegIsotropic.o: $(INCDIR)/OpList.h $(INCDIR)/Timer.h $(INCDIR)/Util.h $(INCDIR)/Init.h $(INCDIR)/InData.h $(INCDIR)/Matrix.h $(INCDIR)/DebugFunctions.h $(INCDIR)/Force.h
 $(OBJDIR)/StressDueToSemiInfSegIsotropic.o: $(INCDIR)/Segment.h $(INCDIR)/PBC.h $(INCDIR)/SegmentPair.h
 $(OBJDIR)/String_t.o: $(INCDIR)/String_t.h
+$(OBJDIR)/SubcyclingIntegrator.o: $(INCDIR)/mpi_portability.h $(INCDIR)/Home.h $(INCDIR)/cuda_portability.h $(INCDIR)/Constants.h $(INCDIR)/ParadisThread.h $(INCDIR)/Typedefs.h $(INCDIR)/ParadisProto.h
+$(OBJDIR)/SubcyclingIntegrator.o: $(INCDIR)/Tag.h $(INCDIR)/FM.h $(INCDIR)/Node.h $(INCDIR)/Thread.h $(INCDIR)/NodeBlock.h $(INCDIR)/Param.h $(INCDIR)/Parse.h $(INCDIR)/Mobility.h $(INCDIR)/MatType_t.h
+$(OBJDIR)/SubcyclingIntegrator.o: $(INCDIR)/Cell.h $(INCDIR)/TagMap.h $(INCDIR)/RemoteDomain.h $(INCDIR)/MirrorDomain.h $(INCDIR)/Topology.h $(INCDIR)/OpList.h $(INCDIR)/Timer.h $(INCDIR)/Util.h
+$(OBJDIR)/SubcyclingIntegrator.o: $(INCDIR)/Init.h $(INCDIR)/InData.h $(INCDIR)/Matrix.h $(INCDIR)/DebugFunctions.h $(INCDIR)/Force.h $(INCDIR)/Segment.h $(INCDIR)/PBC.h $(INCDIR)/SegmentPair.h
+$(OBJDIR)/SubcyclingIntegrator.o: $(INCDIR)/Comm.h $(INCDIR)/Subcycling.h
 $(OBJDIR)/TAYLOR_FMCorrectionTable.o: $(INCDIR)/Home.h $(INCDIR)/mpi_portability.h $(INCDIR)/cuda_portability.h $(INCDIR)/Constants.h $(INCDIR)/ParadisThread.h $(INCDIR)/Typedefs.h
 $(OBJDIR)/TAYLOR_FMCorrectionTable.o: $(INCDIR)/ParadisProto.h $(INCDIR)/Tag.h $(INCDIR)/FM.h $(INCDIR)/Node.h $(INCDIR)/Thread.h $(INCDIR)/NodeBlock.h $(INCDIR)/Param.h $(INCDIR)/Parse.h
 $(OBJDIR)/TAYLOR_FMCorrectionTable.o: $(INCDIR)/Mobility.h $(INCDIR)/MatType_t.h $(INCDIR)/Cell.h $(INCDIR)/TagMap.h $(INCDIR)/RemoteDomain.h $(INCDIR)/MirrorDomain.h $(INCDIR)/Topology.h

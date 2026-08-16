@@ -30,6 +30,7 @@
 #include "NativeSeg.h"
 #include "Moment.h"
 #include "SSF_Driver.h"
+#include "Subcycling.h"
 
 #ifdef _ARLFEM
 #include "FEM.h"
@@ -834,7 +835,7 @@ void LocalSegForces(Home_t *home, int reqType)
  *              Before calculating the force from other segments,
  *              calculate forces specific to this segment
  */
-                if (setSeg1Forces) {
+                if (setSeg1Forces && SubcyclingUseBaseForces(home)) {
 /*
  *                  Add in force due to self stress
  */
@@ -1401,7 +1402,7 @@ void LocalSegForces(Home_t *home, int reqType)
  *              Note: don't bother adding the segment to the list if we're
  *              doing a load-balance only step.
  */
-                if (setSeg1Forces) {
+                if (setSeg1Forces && SubcyclingUseBaseForces(home)) {
 
                     if (param->numDLBCycles == 0) {
                         nativeSegList[nativeSegListCnt].seg = &segList[j];
@@ -1451,6 +1452,11 @@ void LocalSegForces(Home_t *home, int reqType)
 */
                     if ((k >= nativeSegCounts[i]) &&
                         (NodeOwnsSeg(home, node1, node3))) {
+                        continue;
+                    }
+
+                    if (!SubcyclingSelectSegmentPair(home, node1, node2,
+                                                     node3, node4)) {
                         continue;
                     }
 
@@ -1579,6 +1585,11 @@ void LocalSegForces(Home_t *home, int reqType)
                         }
 
                         if ((setSeg1Forces == 0) && (setSeg2Forces == 0)) {
+                            continue;
+                        }
+
+                        if (!SubcyclingSelectSegmentPair(home, node1, node2,
+                                                         node3, node4)) {
                             continue;
                         }
 
@@ -2030,6 +2041,10 @@ void LocalSegForces(Home_t *home, int reqType)
                  }  /* end while loop through cell's inclusions */
 
               }  /* end loop over neighbor cells */
+
+              if (intersection != (SegPartIntersect_t *)NULL) {
+                  nativeSegList[i].seg->sendParticleIntersects = 1;
+              }
         }  /* end if inclusions enabled */
 #endif // ESHELBY
 

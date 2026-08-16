@@ -267,6 +267,14 @@ struct _home {
 
         Param_t   *param;
 
+        /*
+         * Transient state used while the drift-mode subcycling integrator
+         * is active.  The state is allocated and released within a single
+         * outer ParaDiS cycle, before any topology changes can invalidate
+         * its segment-pair keys.
+         */
+        Subcycling_t *subcycling;
+
 #ifdef ANISOTROPIC
         AnisotropicVars_t  anisoVars;
 #ifdef TAYLORFMM

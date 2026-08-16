@@ -28,6 +28,7 @@ void TrapezoidIntegrator      (Home_t *home);
 void TrapezoidIntegratorMulti (Home_t *home);
 void TrapezoidIntegratorKINSOL(Home_t *home);
 void ARKodeIntegrator         (Home_t *home);
+void SubcyclingIntegrator     (Home_t *home);
 
 #ifdef USE_KINSOL
 #include "ParadisSUNDIALS.h"

@@ -80,6 +80,19 @@ static void ParadisInit_Summary
         printf("|\n" );
         }
 
+        if ( StrEquiv(p->timestepIntegrator, "subcycling") )
+        {
+        printf("|   subcycling mode              : drift (always)\n" );
+        printf("|   subcycling groups            : %d\n"       , p->subcyclingNumGroups );
+        printf("|   subcycling radii             : %0.3le %0.3le %0.3le %0.3le\n",
+               p->subcyclingRadii[0], p->subcyclingRadii[1],
+               p->subcyclingRadii[2], p->subcyclingRadii[3]);
+        printf("|   subcycling RKF tolerances    : abs=%0.3le threshold=%0.3le relative=%0.3le\n",
+               p->rTol, p->subcyclingRtolThreshold,
+               p->subcyclingRtolRelative);
+        printf("|\n" );
+        }
+
         if ( StrEquiv(p->timestepIntegrator, "trapezoid-kinsol") )
         {
         printf("|   KINSOL_UseNewton             : %d\n"       , p->KINSOL_UseNewton         );

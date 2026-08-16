@@ -393,6 +393,9 @@ void SetMaterialTypeFromMobility(Home_t *home)
 {
         Param_t *param    = home->param;
         int      mobIndex = 0;
+        int      segmentResistAlias =
+                 StrEquiv(param->mobilityLaw,
+                          "BCC_nl_Eshelby_SegmentResist");
 
         // Look up the attributes of the user-specified mobility module
         // and set various mobility parameters appropriately.
@@ -401,7 +404,11 @@ void SetMaterialTypeFromMobility(Home_t *home)
         {
             int mat=0;
 
-            if (StrEquiv(param->mobilityLaw, (char *)mobAttrList[mobIndex].mobName))
+            if (StrEquiv(param->mobilityLaw,
+                         (char *)mobAttrList[mobIndex].mobName) ||
+                (segmentResistAlias &&
+                 StrEquiv((char *)mobAttrList[mobIndex].mobName,
+                          "BCC_nl_Eshelby_Resist")))
             {
                 param->mobilityType     = mobAttrList[mobIndex].mobilityType;
                 param->mobilityInitFunc = mobAttrList[mobIndex].mobInitFunc;
@@ -617,6 +624,44 @@ void SetRemainingDefaults(Home_t *home)
 
         if (param->minSeg <= 0.0) {
             param->minSeg = sqrt(param->remeshAreaMin * (4.0 / sqrt(3)));
+        }
+
+        /*
+         * Generate ExaDiS-style default separating radii when the user did
+         * not provide any.  The first value remains zero in the control
+         * state; the drift driver additionally places hinges (and distances
+         * below one Burgers vector) in group zero.
+         */
+        if (StrEquiv(param->timestepIntegrator, "subcycling")) {
+            int haveRadii = 0;
+            int numRadii = param->subcyclingNumGroups - 1;
+
+            for (int i = 0; i < numRadii; i++) {
+                haveRadii |= (param->subcyclingRadii[i] != 0.0);
+            }
+
+            if (!haveRadii) {
+                real8 rMax = param->maxSeg;
+                real8 rMin = MIN(MAX(0.3 * param->minSeg,
+                                     3.0 * param->rann), rMax);
+
+                param->subcyclingRadii[0] = 0.0;
+
+                for (int i = 1; i < numRadii; i++) {
+                    real8 phase = (((real8)(i - 1) /
+                                   (real8)(param->subcyclingNumGroups - 2)) -
+                                   0.5) * M_PI;
+                    real8 fraction = 0.5 * (sin(phase) + 1.0);
+                    param->subcyclingRadii[i] =
+                            rMin + fraction * (rMax - rMin);
+                }
+            }
+
+            for (int i = 0; i < 5; i++) {
+                if (param->subcyclingNextDT[i] <= 0.0) {
+                    param->subcyclingNextDT[i] = param->deltaTT;
+                }
+            }
         }
 
         // If the user did not provide an Ecore value, set the default

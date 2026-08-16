@@ -164,6 +164,18 @@ struct _param {
         real8 rmax;      /* maximum migration distance per timestep */
                          /* for any node   */
 
+        /*
+         * Drift-mode force-subcycling controls.  There are at most five
+         * interaction groups, hence four separating radii and five
+         * persistent adaptive timestep suggestions.  All-zero radii select
+         * automatically generated defaults.
+         */
+        int   subcyclingNumGroups;
+        real8 subcyclingRadii[4];
+        real8 subcyclingRtolThreshold;
+        real8 subcyclingRtolRelative;
+        real8 subcyclingNextDT[5];
+
         int   gpu_enabled;          /* Set to 1 to enable GPU force calculations     */
         int   gpu_nstrm  ;          /* number of active CUDA streams                 */
         int   gpu_nthrd  ;          /* number of threads per kernel launch           */

@@ -348,6 +348,7 @@ void ParadisStep(Home_t *home)
     else if (StrEquiv(param->timestepIntegrator, "trapezoid-multi"  )) { TrapezoidIntegratorMulti (home); }
     else if (StrEquiv(param->timestepIntegrator, "trapezoid-kinsol" )) { TrapezoidIntegratorKINSOL(home); }
     else if (StrEquiv(param->timestepIntegrator, "arkode"           )) { ARKodeIntegrator         (home); }
+    else if (StrEquiv(param->timestepIntegrator, "subcycling"       )) { SubcyclingIntegrator     (home); }
     else                                                               { TrapezoidIntegrator      (home); }    //< (default)
 
 

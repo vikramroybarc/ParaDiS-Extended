@@ -299,6 +299,104 @@ void InputSanity (Home_t *home)
         }
 
 /*
+ *      Drift-mode force subcycling requires elastic segment-pair forces and
+ *      uses an RKF 4(5) adaptive step for every interaction group.
+ */
+        if (StrEquiv(param->timestepIntegrator, "subcycling")) {
+            if ((param->subcyclingNumGroups < 2) ||
+                (param->subcyclingNumGroups > 5)) {
+                Fatal("<subcyclingNumGroups> must be between 2 and 5; got %d",
+                      param->subcyclingNumGroups);
+            }
+
+            if (!isfinite(param->subcyclingRtolThreshold) ||
+                (param->subcyclingRtolThreshold <= 0.0)) {
+                Fatal("<subcyclingRtolThreshold> must be finite and positive");
+            }
+
+            if (!isfinite(param->subcyclingRtolRelative) ||
+                (param->subcyclingRtolRelative <= 0.0)) {
+                Fatal("<subcyclingRtolRelative> must be finite and positive");
+            }
+
+            int haveRadii = 0;
+            int numRadii = param->subcyclingNumGroups - 1;
+            for (int i = 0; i < numRadii; i++) {
+                real8 radius = param->subcyclingRadii[i];
+                if (!isfinite(radius) || (radius < 0.0)) {
+                    Fatal("<subcyclingRadii[%d]> must be finite and nonnegative",
+                          i);
+                }
+                haveRadii |= (radius != 0.0);
+            }
+
+            if (haveRadii) {
+                for (int i = 1; i < numRadii; i++) {
+                    if (param->subcyclingRadii[i-1] >
+                        param->subcyclingRadii[i]) {
+                        Fatal("<subcyclingRadii> must be in increasing order");
+                    }
+                }
+            }
+
+            for (int i = 0; i < 5; i++) {
+                if (!isfinite(param->subcyclingNextDT[i]) ||
+                    (param->subcyclingNextDT[i] < 0.0)) {
+                    Fatal("<subcyclingNextDT[%d]> must be finite and nonnegative",
+                          i);
+                }
+            }
+
+            if (!param->elasticinteraction) {
+                Fatal("The subcycling integrator requires <elasticinteraction=1>");
+            }
+
+            if (param->includeInertia) {
+                Fatal("The drift-mode subcycling integrator does not support "
+                      "<includeInertia=1>; subgroup trials require separate "
+                      "inertial histories");
+            }
+
+            if (!isfinite(param->dtDecrementFact) ||
+                (param->dtDecrementFact <= 0.0) ||
+                (param->dtDecrementFact >= 1.0)) {
+                Fatal("<dtDecrementFact> must be between zero and one for "
+                      "subcycling");
+            }
+
+            if (!isfinite(param->dtIncrementFact) ||
+                (param->dtIncrementFact < 1.0)) {
+                Fatal("<dtIncrementFact> must be at least one for "
+                      "subcycling");
+            }
+
+            if (!isfinite(param->maxDT) || (param->maxDT <= 0.0)) {
+                Fatal("<maxDT> must be finite and positive for subcycling");
+            }
+
+            if (param->dtVariableAdjustment &&
+                (!isfinite(param->dtExponent) ||
+                 (param->dtExponent <= 0.0))) {
+                Fatal("<dtExponent> must be finite and positive when variable "
+                      "subcycling timestep adjustment is enabled");
+            }
+
+            if (!isfinite(param->rTol)) {
+                Fatal("<rTol> must be finite for subcycling");
+            }
+
+#ifdef FULL_N2_FORCES
+            Fatal("The subcycling integrator is not available with "
+                  "FULL_N2_FORCES");
+#endif
+
+#ifdef _ARLFEM
+            Fatal("The subcycling integrator has not been validated with "
+                  "_ARLFEM image-force coupling");
+#endif
+        }
+
+/*
  *      If KINSOL has been enabled, do some quick checks on the related
  *      input parameters
  */

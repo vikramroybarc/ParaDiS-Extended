@@ -31,6 +31,7 @@ typedef struct _innode InNode_t;
 typedef struct _param Param_t;
 typedef struct _remotedomain RemoteDomain_t;
 typedef struct _sortnode SortNode_t;
+typedef struct _subcycling Subcycling_t;
 typedef struct _unmappedarm_t UnMappedArm_t;
 typedef struct _SegPartIntersect_t SegPartIntersect_t;
 

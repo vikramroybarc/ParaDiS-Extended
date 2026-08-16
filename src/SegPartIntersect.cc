@@ -375,6 +375,7 @@ void SegPartListAppend(Home_t *home, SegPartIntersect_t *newInfo)
                 intersectInfo->inclusionIndex[i] = newInfo->inclusionIndex[i];
                 intersectInfo->inclusionID[i] = newInfo->inclusionID[i];
             }
+            intersectInfo->numIntersections = newInfo->numIntersections;
 
             home->segpartIntersectCnt = numEntries + 1;
             home->segpartIntersectListSize = allocedEntries;
@@ -742,7 +743,7 @@ SegPartIntersect_t *SegPartListUnsortedLookup(Home_t *home, Tag_t *tag1,
             if ((tmpTag1->domainID == entry->tag1.domainID) &&
                 (tmpTag1->index    == entry->tag1.index   ) &&
                 (tmpTag2->domainID == entry->tag2.domainID) &&
-                (tmpTag2->index    == entry->tag1.index   )) {
+                (tmpTag2->index    == entry->tag2.index   )) {
 
                 return(entry);
             }

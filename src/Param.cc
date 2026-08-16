@@ -151,6 +151,11 @@ void CtrlParamInit(Param_t *param, ParamList_t *CPList)
     BindVar(CPList, "dtVariableAdjustment"  , &param->dtVariableAdjustment  , V_INT   , 1, VFLAG_NULL);
     BindVar(CPList, "rTol"                  , &param->rTol                  , V_DBL   , 1, VFLAG_NULL); param->rTol = -1.0;
     BindVar(CPList, "rmax"                  , &param->rmax                  , V_DBL   , 1, VFLAG_NULL); param->rmax = 100;
+    BindVar(CPList, "subcyclingNumGroups"   , &param->subcyclingNumGroups   , V_INT   , 1, VFLAG_NULL); param->subcyclingNumGroups = 5;
+    BindVar(CPList, "subcyclingRadii"       ,  param->subcyclingRadii       , V_DBL   , 4, VFLAG_NULL);
+    BindVar(CPList, "subcyclingRtolThreshold", &param->subcyclingRtolThreshold, V_DBL, 1, VFLAG_NULL); param->subcyclingRtolThreshold = 1.0;
+    BindVar(CPList, "subcyclingRtolRelative", &param->subcyclingRtolRelative, V_DBL   , 1, VFLAG_NULL); param->subcyclingRtolRelative = 0.1;
+    BindVar(CPList, "subcyclingNextDT"      ,  param->subcyclingNextDT      , V_DBL   , 5, VFLAG_NULL);
 
     //  GPU controls...
 
@@ -814,7 +819,17 @@ void Print_Param (Param_t *p, const char *msg)
    printf("   dtExponent                           : %+lf\n"     , p->dtExponent );
    printf("   dtVariableAdjustment                 : %d\n"       , p->dtVariableAdjustment );
    printf("   rTol                                 : %+lf\n"     , p->rTol );
-   printf("   rmax                                 : %+lf\n\n"   , p->rmax );
+   printf("   rmax                                 : %+lf\n"     , p->rmax );
+   printf("   subcyclingNumGroups                  : %d\n"       , p->subcyclingNumGroups );
+   printf("   subcyclingRadii                      : [%+lf %+lf %+lf %+lf]\n",
+          p->subcyclingRadii[0], p->subcyclingRadii[1],
+          p->subcyclingRadii[2], p->subcyclingRadii[3]);
+   printf("   subcyclingRtolThreshold              : %+lf\n"     , p->subcyclingRtolThreshold );
+   printf("   subcyclingRtolRelative               : %+lf\n"     , p->subcyclingRtolRelative );
+   printf("   subcyclingNextDT                     : [%+le %+le %+le %+le %+le]\n\n",
+          p->subcyclingNextDT[0], p->subcyclingNextDT[1],
+          p->subcyclingNextDT[2], p->subcyclingNextDT[3],
+          p->subcyclingNextDT[4]);
 
    printf("   KINSOL_UseNewton                     : %d\n"       , p->KINSOL_UseNewton );
    printf("   KINSOL_MaxIterations                 : %d\n"       , p->KINSOL_MaxIterations );
