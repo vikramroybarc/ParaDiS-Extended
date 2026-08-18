@@ -225,7 +225,7 @@ DEFS=
 #    available and located in the location specified by the appropriate
 #    KINSOL_DIR.<SYS> value in makefile.sys.
 #
-KINSOL_MODE=ON
+#KINSOL_MODE=ON
 
 #-------------------------------------------------------------------------------------------
 #    ARKODE is a general-purpose solver for multi-rate ODE systems
