@@ -1,168 +1,238 @@
-
 # ParaDiS
 
-ParaDiS Public Release Version 4.0
+ParaDiS Public Release Version 4.0 — Local Enhanced Version
 
-ParaDiS (Parallel Dislocation Simulator) is a simulation tool that performs direct numerical simulation of dislocation ensembles, the carriers of plasticity, to predict the strength in crystalline materials from the fundamental physics of defect motion, evolution, and interaction.
+ParaDiS (Parallel Dislocation Simulator) is a simulation tool that performs direct numerical simulation of dislocation ensembles, the carriers of plasticity, to predict the strength of crystalline materials from the fundamental physics of defect motion, evolution, and interaction.
 
-The code has been successfully deployed on high performance computing architectures and used to study the origins of strength and strain hardening for cubic crystals, the strength of micro-pillars, and irradiated materials at LLNL. The ParaDiS code has been successfully deployed on more than one hundred thousand CPU's with over ten million active degrees of freedom.
+This repository is based on the LLNL ParaDiS public release and contains additional local developments extending the original code base. In particular, the current version includes:
+
+1. **`MobilityLaw_BccnlEshlby`** — an additional BCC non-linear mobility-law implementation with Eshelby-related treatment.
+2. **Drift-mode subcycling integrator** — an enhanced time-integration capability that introduces subcycling for drift-mode evolution.
+
+These additions are local enhancements and are not part of the original LLNL ParaDiS 4.0 public release.
+
+The ParaDiS code has been successfully deployed on high-performance computing architectures and used to study the origins of strength and strain hardening for cubic crystals, the strength of micro-pillars, and irradiated materials at LLNL. The original ParaDiS code has been deployed on more than one hundred thousand CPUs with over ten million active degrees of freedom.
+
+## Local Enhancements
+
+### 1. `MobilityLaw_BccnlEshlby`
+
+This version adds the mobility-law implementation:
+
+```text
+MobilityLaw_BccnlEshlby
+```
+
+The implementation extends the mobility-law capabilities available in the LLNL base version for simulations requiring a **BCC non-linear mobility formulation with Eshelby-related treatment**.
+
+The new mobility law is integrated into the local ParaDiS source tree and can be selected through the corresponding mobility-law configuration supported by this version.
+
+Users migrating input files from the LLNL base release should ensure that the mobility-law parameters required by `MobilityLaw_BccnlEshlby` are defined consistently with the material model being simulated.
+
+### 2. Drift-Mode Subcycling Integrator
+
+This version also introduces a **drift-mode subcycling integration scheme**.
+
+The enhancement extends the time-integration framework of the LLNL base version by allowing drift-mode evolution to be resolved using substeps within a larger simulation timestep. This provides a mechanism for treating drift-related dynamics on a finer integration timescale when required while retaining the overall ParaDiS timestep structure.
+
+The drift-mode subcycling functionality is implemented as part of the local time-integration workflow. Appropriate control parameters should be specified in the simulation control file when this integration mode is enabled.
+
+Because this feature is an extension of the LLNL public release, control files using the drift-mode subcycling options may not be directly compatible with an unmodified ParaDiS 4.0 installation.
 
 ## Installation
 
-### Quick start
+### Quick Start
 
-The public distribution of ParaDiS is built using conventional make files. 
+The public distribution of ParaDiS is built using conventional makefiles.
 
-1. Select a target system (e.g. `SYS=gcc` at line 52) and compilation mode (`MODE=SERIAL` or `MODE=PARALLEL` at lines 66-67) in file `makefile.setup`
-2. Compile the code from the root of the distribution using the `make` command
-3. Successful compilation will produce binary executables in the `./bin` directory
-4. Test your installation by running an example
-```
+1. Select a target system (for example, `SYS=gcc`) and compilation mode (`MODE=SERIAL` or `MODE=PARALLEL`) in `makefile.setup`.
+2. Compile the code from the root of the distribution using the `make` command.
+3. Successful compilation will produce binary executables in the `./bin` directory.
+4. Test your installation by running an example:
+
+```bash
 ./bin/paradis tests/frank_read_src.ctrl
 ```
 
-### Detailed instructions
+### Detailed Instructions
 
 The build system is comprised of a number of makefiles:
 
-* `makefile`           : overall makefile to build ParaDiS and supporting utilities
-* `makefile.setup`     : use to enable/disable various application features
-* `makefile.sys`       : system specific build settings for various supported systems
-* `makefile.srcs`      : complete list of all source files used to build system
-* `src/makefile`       : makefile that builds ParaDiS 
-* `src/makefile.dep`   : makefile dependencies (auto-generated via make depend)
-* `tests/makefile`     : makefile for cleaning up and managing the test directory
-* `utils/makefile`     : makefile to building the various utility applications
-* `ext/makefile`       : makefile for building any external dependencies
+* `makefile`         : overall makefile to build ParaDiS and supporting utilities
+* `makefile.setup`   : used to enable/disable various application features
+* `makefile.sys`     : system-specific build settings for supported systems
+* `makefile.srcs`    : complete list of source files used to build the system
+* `src/makefile`     : makefile that builds ParaDiS
+* `src/makefile.dep` : makefile dependencies, auto-generated via `make depend`
+* `tests/makefile`   : makefile for cleaning and managing the test directory
+* `utils/makefile`   : makefile for building the various utility applications
+* `ext/makefile`     : makefile for building external dependencies
 
-If you want or need to customize the build for your machine, you may need to adjust the two 
-files - `makefile.sys` and `makefile.setup` before executing `make`.
+If you want or need to customize the build for your machine, you may need to adjust `makefile.sys` and `makefile.setup` before executing `make`.
 
-Executing make from the main directory will build the main ParaDiS executable
-and all the supporting tools. If you only want to build the main ParaDiS application, 
-execute `make` from the main source directory (`src/`).
+Executing `make` from the main directory will build the main ParaDiS executable and all supporting tools. If you only want to build the main ParaDiS application, execute `make` from the main source directory (`src/`).
 
-#### makefile.sys
+#### `makefile.sys`
 
-Prior to building ParaDiS, you will need to identify the target system 
-and environment for the application. Several target systems are preset and
-are listed below:
+Prior to building ParaDiS, you will need to identify the target system and environment for the application. Several target systems are preset and are listed below:
 
-```
-linux.intel     Linux systems using native Intel compilers.
-linux           Generic linux system
-gcc             Generic system build using gnu compilers
-aix             IBM aix systems using native compilers (LLNL's ice, berg, purple, um, up, uv...)
-mac             MacBook Pro 
-bgp             LC BlueGene/P systems (dawn, dawndev)
-bgq             LC BlueGene/Q systems (sequoia, rzuseq)
-mc-cc           Stanford ME Linux system using intel compilers
-wcr             Stanford ME Linux system using intel compilers
-cygwin          Stanford Linux emulator for Windows PC
-xt4             Cray XT4 systems (NERSC's franklin)
+```text
+linux.intel     Linux systems using native Intel compilers
+linux           Generic Linux system
+gcc             Generic system build using GNU compilers
+aix             IBM AIX systems using native compilers
+mac             macOS / MacBook Pro
+bgp             LC BlueGene/P systems
+bgq             LC BlueGene/Q systems
+mc-cc           Stanford ME Linux system using Intel compilers
+wcr             Stanford ME Linux system using Intel compilers
+cygwin          Linux-compatible environment for Windows
+xt4             Cray XT4 systems
 ```
 
-If you are attempting to build the ParaDiS software on a system that is not listed above,
-you may need to copy and/or adjust an existing system in the `makefile.sys` file and
-set the `SYS=` parameter in `makefile.setup`.
+If you are attempting to build ParaDiS on a system that is not listed above, you may need to copy and/or adjust an existing system configuration in `makefile.sys` and set the `SYS=` parameter in `makefile.setup`.
 
-#### makefile.setup
+#### `makefile.setup`
 
-All the user-specific features and settings are enabled/disabled via the 
-`makefile.setup` file.  Here you can specify whether the application will 
-run serially or parallel (via MPI), set the optimization level, enable the
-X-Windows display, etc.  Details on all the switches are documented in the
-file.
+All user-specific features and settings are enabled or disabled through `makefile.setup`. Here you can specify whether the application runs serially or in parallel via MPI, set the optimization level, enable X-Windows display support, and configure other build options.
 
 The main parameters you need to select are:
 
+```text
+# Required parameter: identify the target host machine
+SYS=[linux.intel | linux | gcc | aix | mac | bgp | bgq | mc-cc | wcr | cygwin | xt4]
+
+MODE=SERIAL     # sets execution mode to serial
+MODE=PARALLEL   # sets execution mode to parallel; requires MPI
+
+XLIB_MODE=ON    # enables X-Window visualization; not recommended for production runs
+XLIB_MODE=OFF   # disables X-Window visualization
 ```
-# required parameter, must identify the target host machine
-SYS=[linux.intel | linux | gcc | aix| mac | bgp| bgq | mc-cc| wcr| cygwin | xt4 ]
 
-MODE=SERIAL     # sets the execution mode to serial
-MODE=PARALLEL   # sets the execution mode to parallel (default, requires an MPI installation) 
-
-XLIB_MODE=ON    # enables  the X-Window visualization (do not use for production runs)
-XLIB_MODE=OFF   # disables the X-Window visualization (default)
-```
-
-All other parameters and settings are detailed in the `makefile.setup` file.
+All other parameters and settings are detailed in `makefile.setup`.
 
 ## Directory Structure
 
 Brief description of the directories within this distribution:
 
 * `./bin`      : executable applications, created during build
-* `./src`      : C/C++ source files (*.cc)
-* `./include`  : C/C++ include files (*.h)
-* `./obj`    : object file directories (parallel and serial builds)
-* `./docs`     : support documentation 
-* `./inputs`   : generic input files (Rijm tables, FMM tables, gnuplot files, and X-Windows defaults)
+* `./src`      : C/C++ source files (`*.cc`)
+* `./include`  : C/C++ include files (`*.h`)
+* `./obj`      : object-file directories for parallel and serial builds
+* `./docs`     : supporting documentation
+* `./inputs`   : generic input files, including Rijm tables, FMM tables, gnuplot files, and X-Windows defaults
 * `./tests`    : example tests (`*.ctrl`, `*.data`, `*.sh`)
 * `./utils`    : support utilities
 * `./tools`    : support tools
 
 ## Applications and Tools
 
-The following applications and support utilities are created when building 
-the ParaDiS application from the root location:
+The following applications and support utilities are created when building ParaDiS from the root directory:
 
-* `./bin/paradis`           : main ParaDiS simulator
-* `./bin/paradisconvert`    : conversion utility for older (unsupported) control and data files
-* `./bin/calcdensity`       : dislocation density calculator
-* `./bin/ctablegen`        : utility for creating PBC image correction tables
-* `./bin/ctablegenp`        : utility for creating PBC image correction tables (parallel/MPI version)
-* `./bin/paradisgen`        : utility for creating initial, random dislocation networks
-* `./bin/paradisrepart`     : utility for repartitioning existing domain decompositions
-* `./bin/stresstablegen`    : utility for creating far-field stress tables
+* `./bin/paradis`        : main ParaDiS simulator
+* `./bin/paradisconvert` : conversion utility for older, unsupported control and data files
+* `./bin/calcdensity`    : dislocation density calculator
+* `./bin/ctablegen`      : utility for creating PBC image-correction tables
+* `./bin/ctablegenp`     : parallel/MPI utility for creating PBC image-correction tables
+* `./bin/paradisgen`     : utility for creating initial random dislocation networks
+* `./bin/paradisrepart`  : utility for repartitioning existing domain decompositions
+* `./bin/stresstablegen` : utility for creating far-field stress tables
 
 ## Simulation Examples
 
-There are numerous examples of simulation input files located in the 
-`tests/` directory. ParaDiS is mainly controlled by two input files, a `.data` file and a `.ctrl` file.
-The `data` file specifies the domain size and initial dislocation network.
-The `ctrl` file specifies the materials parameters, loading procedure, and numerical parameters of the simulation.
+There are numerous examples of simulation input files in the `tests/` directory.
 
-Most of the control files in the `./tests` directory are setup for parallel execution by 8 processors. This enables
-the tests to be run on a contemporary multicore desktop. The total number of MPI processes
-is control by the domain parameters:
+ParaDiS is mainly controlled by two input files:
 
-```
+* a `.data` file, which specifies the simulation domain and initial dislocation network;
+* a `.ctrl` file, which specifies material parameters, loading conditions, numerical parameters, mobility-law settings, and integration options.
+
+Local simulations using `MobilityLaw_BccnlEshlby` or the drift-mode subcycling integrator may require control parameters that are not present in control files from the original LLNL public distribution.
+
+Most of the control files in the `./tests` directory are configured for parallel execution using eight processors. This enables the tests to be run on a contemporary multicore workstation. The total number of MPI processes is controlled by the domain parameters:
+
+```text
 numXdoms = 2  # number of X-axis domains
 numYdoms = 2  # number of Y-axis domains
 numZdoms = 2  # number of Z-axis domains
 ```
 
-The total domain count (processes) = (`numXdoms` * `numYdoms` * `numZdoms`)
-Note that the total domain count identified in the control file needs to be consistent with the 
-number of MPI tasks/processes that are launched when the application is run. The command line 
-for launching an MPI-enabled run of ParaDiS using the above domain configuration would be,
+The total domain count is:
 
+```text
+numXdoms * numYdoms * numZdoms
 ```
+
+The domain count specified in the control file must be consistent with the number of MPI tasks launched for the simulation.
+
+For the domain configuration above, an MPI-enabled ParaDiS run can be launched with:
+
+```bash
 mpirun -n 8 ./bin/paradis ./tests/mg-cAxis.ctrl
 ```
 
-Important note: several of the test files use precomputed FMM tables.  Those tables are located
-in the `./inputs` directory. The paths to these files are controlled in the ParaDiS control files
-assume that the ParaDiS application is started from the main ParaDiS directory (e.g. `./bin/paradis`).
-If you do not execute ParaDiS in this way, you must specify the paths to the input control, data,
-and any auxiliary files relative to where you are running the application.
+### Input-File Paths
 
-Some of the examples include Fast Multipole Method (FMM) expansion tables.  You can create FMM image 
-correction tables using the `ctablegen` utility. 
+Several test files use precomputed FMM tables located in the `./inputs` directory.
 
-To generate an FMM table for an isotropic simulation: 
+The paths in the ParaDiS control files generally assume that ParaDiS is launched from the main repository directory, for example:
+
+```bash
+./bin/paradis tests/example.ctrl
 ```
-  ./bin/ctablegen -nu 3.327533e-01 -mu 6.488424e+10 -mporder 2 -torder 5 -outfile inputs/fmm-ctab.data
-```
-See the ParaDiS users guide for more details on building FMM correction tables.
 
-Initial dislocation networks can be created using the `paradisgen` application.
+If ParaDiS is launched from another working directory, paths to the control file, data file, and any auxiliary files must be adjusted accordingly.
+
+### FMM Correction Tables
+
+Some examples use Fast Multipole Method (FMM) expansion tables. FMM image-correction tables can be generated using the `ctablegen` utility.
+
+For an isotropic simulation:
+
+```bash
+./bin/ctablegen \
+    -nu 3.327533e-01 \
+    -mu 6.488424e+10 \
+    -mporder 2 \
+    -torder 5 \
+    -outfile inputs/fmm-ctab.data
+```
+
+See the ParaDiS user's guide for additional information on constructing FMM correction tables.
+
+### Initial Dislocation Networks
+
+Initial dislocation networks can be generated using:
+
+```bash
+./bin/paradisgen
+```
+
+## Compatibility with the LLNL Base Version
+
+This repository is derived from the LLNL ParaDiS Public Release Version 4.0.
+
+The core ParaDiS functionality remains based on that release, while the local source tree contains additional developments, including:
+
+```text
+MobilityLaw_BccnlEshlby
+Drift-mode subcycling integrator
+```
+
+As a result:
+
+* simulations relying only on standard ParaDiS 4.0 functionality are intended to remain compatible with the LLNL base implementation;
+* simulations using the local mobility law require the enhanced source tree;
+* simulations using drift-mode subcycling require the enhanced integration implementation and its associated control parameters;
+* input files containing locally introduced parameters may not run with an unmodified LLNL ParaDiS 4.0 executable.
+
+When reproducing simulation results, users should therefore identify both the ParaDiS base version and whether these local enhancements were enabled.
 
 ## Citation
 
-```
+When publishing results obtained using this ParaDiS-derived code, please cite the original ParaDiS publication:
+
+```bibtex
 @article{arsenlis2007enabling,
   title={Enabling strain hardening simulations with dislocation dynamics},
   author={Arsenlis, Athanasios and Cai, Wei and Tang, Meijie and Rhee, Moono and Oppelstrup, Tomas and Hommes, Gregg and Pierce, Tom G and Bulatov, Vasily V},
@@ -175,9 +245,16 @@ Initial dislocation networks can be created using the `paradisgen` application.
 }
 ```
 
+If results depend specifically on `MobilityLaw_BccnlEshlby` or the drift-mode subcycling integrator, the local implementation/version used for the simulations should also be identified in the associated publication or reproducibility documentation.
+
 ## License
 
 ParaDiS is released under the BSD-3 license. See [LICENSE](LICENSE) for details.
 
+The local enhancements in this repository should be used and distributed in accordance with the applicable repository license and any notices associated with the modified source files.
+
 LLNL-CODE-853453
+
 # Paradis_Local
+
+Local ParaDiS development based on LLNL ParaDiS Public Release Version 4.0, including the `MobilityLaw_BccnlEshlby` mobility law and drift-mode subcycling integration enhancements.
