@@ -13,31 +13,6 @@ These additions are local enhancements and are not part of the original LLNL Par
 
 The ParaDiS code has been successfully deployed on high-performance computing architectures and used to study the origins of strength and strain hardening for cubic crystals, the strength of micro-pillars, and irradiated materials at LLNL. The original ParaDiS code has been deployed on more than one hundred thousand CPUs with over ten million active degrees of freedom.
 
-## Local Enhancements
-
-### 1. `MobilityLaw_BccnlEshlby`
-
-This version adds the mobility-law implementation:
-
-```text
-MobilityLaw_BccnlEshlby
-```
-
-The implementation extends the mobility-law capabilities available in the LLNL base version for simulations requiring a **BCC non-linear mobility formulation with Eshelby-related treatment**.
-
-The new mobility law is integrated into the local ParaDiS source tree and can be selected through the corresponding mobility-law configuration supported by this version.
-
-Users migrating input files from the LLNL base release should ensure that the mobility-law parameters required by `MobilityLaw_BccnlEshlby` are defined consistently with the material model being simulated.
-
-### 2. Drift-Mode Subcycling Integrator
-
-This version also introduces a **drift-mode subcycling integration scheme**.
-
-The enhancement extends the time-integration framework of the LLNL base version by allowing drift-mode evolution to be resolved using substeps within a larger simulation timestep. This provides a mechanism for treating drift-related dynamics on a finer integration timescale when required while retaining the overall ParaDiS timestep structure.
-
-The drift-mode subcycling functionality is implemented as part of the local time-integration workflow. Appropriate control parameters should be specified in the simulation control file when this integration mode is enabled.
-
-Because this feature is an extension of the LLNL public release, control files using the drift-mode subcycling options may not be directly compatible with an unmodified ParaDiS 4.0 installation.
 
 ## Installation
 
