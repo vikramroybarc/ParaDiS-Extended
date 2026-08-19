@@ -131,6 +131,10 @@ struct _subcycling {
     int localPairCount[MAX_SUBCYCLING_GROUPS];
     int globalPairCount[MAX_SUBCYCLING_GROUPS];
     std::map<SegmentPairKey, int> pairGroup;
+    std::map<SegmentPairKey, real8> pairDistance2;
+    std::map<TagKey, int> nodeFlag;
+    real8 rg9s;
+    int movedInteractions;
     std::vector<real8> cachedForce[MAX_SUBCYCLING_GROUPS];
 };
 
@@ -149,6 +153,46 @@ static int SegmentsShareNode(Node_t *node1, Node_t *node2,
             TagsEqual(node1->myTag, node4->myTag) ||
             TagsEqual(node2->myTag, node3->myTag) ||
             TagsEqual(node2->myTag, node4->myTag));
+}
+
+/*
+ * ExaDiS-style node-state helpers.  An absent entry is equivalent to
+ * nflag==1, so resetting all node flags is just a map clear.
+ *
+ *     0 : suppress this node during subsequent lower-group RKF stages
+ *     1 : normal node
+ *     2 : excessive highest-group RKF error; nearby highest-group
+ *         interactions are candidates for migration to Ngroups-2
+ */
+static int GetNodeFlag(Subcycling_t *state, const TagKey &tag)
+{
+    std::map<TagKey, int>::iterator found = state->nodeFlag.find(tag);
+    return (found == state->nodeFlag.end()) ? 1 : found->second;
+}
+
+static int GetNodeFlag(Subcycling_t *state, const Tag_t &tag)
+{
+    return GetNodeFlag(state, TagKey(tag));
+}
+
+static void SetNodeFlag(Subcycling_t *state, const Tag_t &tag, int flag)
+{
+    state->nodeFlag[TagKey(tag)] = flag;
+}
+
+static void ResetNodeFlags(Home_t *home)
+{
+    if (home->subcycling == (Subcycling_t *)NULL) return;
+    home->subcycling->nodeFlag.clear();
+}
+
+static int PairTouchesFlag2(Subcycling_t *state,
+                            const SegmentPairKey &key)
+{
+    return ((GetNodeFlag(state, key.first.first)   == 2) ||
+            (GetNodeFlag(state, key.first.second)  == 2) ||
+            (GetNodeFlag(state, key.second.first)  == 2) ||
+            (GetNodeFlag(state, key.second.second) == 2));
 }
 
 static void StartSubcycling(Home_t *home)
@@ -183,7 +227,31 @@ static void StartSubcycling(Home_t *home)
         state->radius2[i] = MAX(state->radius2[i], state->radius2[i-1]);
     }
 
+    /*
+     * ExaDiS uses
+     *
+     *   rg9 = max(3*r_{N-2}, 0.5*(r_{N-2}+cutoff))
+     *
+     * and stores rg9^2.  ParaDiS_Local has no separate explicit
+     * segment-pair cutoff in this subcycling path; its automatic group
+     * construction uses maxSeg as the corresponding upper length scale,
+     * so use maxSeg here as the cutoff analogue.
+     */
+    {
+        int lowerGroup = state->numGroups - 2;
+        real8 lowerRadius = sqrt(state->radius2[lowerGroup]);
+        real8 cutoff = param->maxSeg;
+        real8 rg9 = MAX(3.0 * lowerRadius,
+                        0.5 * (lowerRadius + cutoff));
+        state->rg9s = rg9 * rg9;
+    }
+
+    state->movedInteractions = 0;
+    state->pairDistance2.clear();
+    state->nodeFlag.clear();
+
     home->subcycling = state;
+    ResetNodeFlags(home);
 }
 
 static void FinishSubcycling(Home_t *home)
@@ -241,6 +309,85 @@ static void RestorePositionVelocity(
         node->z = values[i].x[2];
         node->vX = values[i].v[0]; node->vY = values[i].v[1];
         node->vZ = values[i].v[2];
+    }
+}
+
+/*
+ * Drift-mode virtual groups restore only the trial positions.  The velocity
+ * produced by the accepted virtual RKF step is deliberately retained so it
+ * can be compared with the velocity at the beginning of the subcycle, as in
+ * ExaDiS forward_progress_check().
+ */
+static void RestorePositionsOnly(
+        const std::vector<PositionVelocity> &values)
+{
+    for (size_t i = 0; i < values.size(); i++) {
+        Node_t *node = values[i].node;
+        node->x = values[i].x[0];
+        node->y = values[i].x[1];
+        node->z = values[i].x[2];
+    }
+}
+
+/*
+ * Equivalent of IntegratorSubcyclingBase::flag_oscillating_nodes().
+ * Nodes marked nflag<=0 are frozen during lower-group RKF stages.
+ */
+static void ApplyNodeFlagsToVelocity(Home_t *home, int group)
+{
+    Subcycling_t *state = home->subcycling;
+
+    if (state == (Subcycling_t *)NULL) return;
+    if (group == state->numGroups-1) return;
+
+    for (int i = 0; i < home->newNodeKeyPtr; i++) {
+        Node_t *node = home->nodeKeys[i];
+        if (node == (Node_t *)NULL) continue;
+
+        if (GetNodeFlag(state, node->myTag) <= 0) {
+            node->vX = 0.0;
+            node->vY = 0.0;
+            node->vZ = 0.0;
+        }
+    }
+
+    for (int i = 0; i < home->ghostNodeCount; i++) {
+        Node_t *node = home->ghostNodeList[i];
+        if (node == (Node_t *)NULL) continue;
+
+        if (GetNodeFlag(state, node->myTag) <= 0) {
+            node->vX = 0.0;
+            node->vY = 0.0;
+            node->vZ = 0.0;
+        }
+    }
+}
+
+/*
+ * Equivalent of IntegratorSubcyclingBase::forward_progress_check().
+ * A reversal of velocity direction marks the node nflag=0, causing it to be
+ * suppressed in subsequent lower-group RKF stages until the driver switches
+ * groups and ResetNodeFlags() is called.
+ */
+static void ForwardProgressCheck(
+        Home_t *home,
+        const std::vector<PositionVelocity> &oldState)
+{
+    Subcycling_t *state = home->subcycling;
+    if (state == (Subcycling_t *)NULL) return;
+
+    for (size_t i = 0; i < oldState.size(); i++) {
+        Node_t *node = oldState[i].node;
+        if (node == (Node_t *)NULL) continue;
+        if (GetNodeFlag(state, node->myTag) <= 0) continue;
+
+        real8 velocityDot = oldState[i].v[0] * node->vX +
+                            oldState[i].v[1] * node->vY +
+                            oldState[i].v[2] * node->vZ;
+
+        if (velocityDot < 0.0) {
+            SetNodeFlag(state, node->myTag, 0);
+        }
     }
 }
 
@@ -421,6 +568,51 @@ static void SaveCurrentGroupForce(Home_t *home, int group)
     }
 }
 
+/*
+ * ParaDiS-native equivalent of SegSegGroups::move_interactions().
+ *
+ * ExaDiS physically marks entries in the highest-group list inactive and
+ * later appends them to Ngroups-2.  This ParaDiS port classifies every pair
+ * through pairGroup, so changing pairGroup[key] is sufficient to make all
+ * later LocalSegForces passes evaluate the pair in the lower group.
+ */
+static int MoveHighestGroupInteractions(Home_t *home, int iTry)
+{
+    Subcycling_t *state = home->subcycling;
+
+    if ((state == (Subcycling_t *)NULL) || (state->numGroups < 2)) return 0;
+
+    int highestGroup = state->numGroups - 1;
+    int lowerGroup = state->numGroups - 2;
+
+    real8 scale = (real8)(iTry + 1);
+    real8 migrationDistance2 = state->rg9s * scale * scale;
+    int moved = 0;
+
+    for (std::map<SegmentPairKey, int>::iterator it = state->pairGroup.begin();
+         it != state->pairGroup.end(); ++it) {
+
+        if (it->second != highestGroup) continue;
+        if (!PairTouchesFlag2(state, it->first)) continue;
+
+        std::map<SegmentPairKey, real8>::iterator distance =
+                state->pairDistance2.find(it->first);
+        if (distance == state->pairDistance2.end()) continue;
+        if (distance->second > migrationDistance2) continue;
+
+        it->second = lowerGroup;
+
+        if (state->localPairCount[highestGroup] > 0) {
+            state->localPairCount[highestGroup]--;
+        }
+        state->localPairCount[lowerGroup]++;
+        moved++;
+    }
+
+    state->movedInteractions += moved;
+    return moved;
+}
+
 static void ReduceRKFErrors(real8 localError, real8 localRelative,
                             real8 localPosition, real8 localInvalid,
                             real8 *globalError, real8 *globalRelative,
@@ -443,7 +635,9 @@ static void ReduceRKFErrors(real8 localError, real8 localRelative,
 #endif
 }
 
-static RKFResult AdaptiveRKFStep(Home_t *home, int group, real8 attemptDT)
+static RKFResult AdaptiveRKFStep(
+        Home_t *home, int group, real8 attemptDT,
+        std::vector<PositionVelocity> *acceptedBaseState = NULL)
 {
     static const real8 stageCoefficients[6][6] = {
         { 1.0/4.0,        0.0,           0.0,            0.0,             0.0,      0.0 },
@@ -466,6 +660,7 @@ static RKFResult AdaptiveRKFStep(Home_t *home, int group, real8 attemptDT)
     if (dt <= 0.0) dt = param->maxDT;
 
     int rejected = 0;
+    int iTry = 0;
     real8 acceptedError = 0.0;
 
     for (;;) {
@@ -473,18 +668,30 @@ static RKFResult AdaptiveRKFStep(Home_t *home, int group, real8 attemptDT)
 
         int mobilityError = EvaluateCurrentState(home, group, dt);
 
+        std::vector<PositionVelocity> attemptBaseState;
+        if (!mobilityError && (acceptedBaseState != NULL)) {
+            /*
+             * This is the ParaDiS equivalent of IntegratorRKF::vcurr:
+             * velocity at the base configuration of the current RKF try.
+             * If this try is accepted it is used by ForwardProgressCheck().
+             */
+            attemptBaseState = CapturePositionVelocity(home);
+        }
+
         if (!mobilityError && (group > 0)) {
             /* Cache only the force at the current physical configuration. */
             SaveCurrentGroupForce(home, group);
         }
 
         if (!mobilityError) {
+            ApplyNodeFlagsToVelocity(home, group);
             StoreRKFVelocity(nodes, 0);
 
             for (int stage = 0; stage < 5; stage++) {
                 MoveRKFNodes(home, nodes, dt, stageCoefficients[stage]);
                 mobilityError = EvaluateCurrentState(home, group, dt);
                 if (mobilityError) break;
+                ApplyNodeFlagsToVelocity(home, group);
                 StoreRKFVelocity(nodes, stage + 1);
             }
         }
@@ -501,8 +708,6 @@ static RKFResult AdaptiveRKFStep(Home_t *home, int group, real8 attemptDT)
             real8 localInvalid = 0.0;
 
             for (size_t i = 0; i < nodes.size(); i++) {
-                if (!nodes[i].native) continue;
-
                 real8 error[3] = { 0.0, 0.0, 0.0 };
                 real8 outputDelta[3] = { 0.0, 0.0, 0.0 };
 
@@ -528,9 +733,6 @@ static RKFResult AdaptiveRKFStep(Home_t *home, int group, real8 attemptDT)
                                           outputDelta[1]*outputDelta[1] +
                                           outputDelta[2]*outputDelta[2]);
 
-                localError = MAX(localError, errorNorm);
-                localPosition = MAX(localPosition, positionNorm);
-
                 real8 oldx = nodes[i].x[0];
                 real8 oldy = nodes[i].x[1];
                 real8 oldz = nodes[i].x[2];
@@ -542,6 +744,37 @@ static RKFResult AdaptiveRKFStep(Home_t *home, int group, real8 attemptDT)
                 real8 dy = node->y - oldy;
                 real8 dz = node->z - oldz;
                 real8 displacement = sqrt(dx*dx + dy*dy + dz*dz);
+
+                /*
+                 * ExaDiS ErrorFlagNodes equivalent.  During the first three
+                 * highest-group attempts, classify each locally visible node
+                 * so failed attempts can migrate nearby highest-group pairs.
+                 * Do not overwrite nflag==0 if a future code path calls this
+                 * after a forward-progress failure.
+                 */
+                if ((group == home->subcycling->numGroups-1) &&
+                    (iTry < 3) &&
+                    (GetNodeFlag(home->subcycling, node->myTag) > 0)) {
+
+                    int acceptable =
+                            (errorNorm < param->rTol) &&
+                            ((errorNorm < param->subcyclingRtolThreshold) ||
+                             ((displacement > 0.0) &&
+                              ((errorNorm / displacement) <
+                               param->subcyclingRtolRelative)));
+
+                    SetNodeFlag(home->subcycling, node->myTag,
+                                acceptable ? 1 : 2);
+                }
+
+                /*
+                 * Only native nodes participate in the domain-global RKF
+                 * acceptance reductions, avoiding duplicate ghost entries.
+                 */
+                if (!nodes[i].native) continue;
+
+                localError = MAX(localError, errorNorm);
+                localPosition = MAX(localPosition, positionNorm);
 
                 if (errorNorm > param->subcyclingRtolThreshold) {
                     real8 relative;
@@ -578,11 +811,26 @@ static RKFResult AdaptiveRKFStep(Home_t *home, int group, real8 attemptDT)
 
             if (!mobilityError) {
                 acceptedError = globalError;
+                if (acceptedBaseState != NULL) {
+                    *acceptedBaseState = attemptBaseState;
+                }
                 break;
             }
         }
 
+        /*
+         * Equivalent of IntegratorRKFSubcycling::non_convergent().
+         * Migration is restricted to the first three failed attempts of the
+         * highest group, exactly as in ExaDiS (nTry=3).
+         */
+        if (!mobilityError &&
+            (group == home->subcycling->numGroups-1) &&
+            (iTry < 3)) {
+            MoveHighestGroupInteractions(home, iTry);
+        }
+
         rejected = 1;
+        iTry++;
         RestoreRKFBase(nodes);
         dt *= param->dtDecrementFact;
 
@@ -669,10 +917,11 @@ int SubcyclingSelectSegmentPair(Home_t *home, Node_t *node1, Node_t *node2,
     if (found != state->pairGroup.end()) {
         group = found->second;
     } else {
+        real8 distance2 = 0.0;
+
         if (SegmentsShareNode(node1, node2, node3, node4)) {
             group = 0;
         } else {
-            real8 distance2 = 0.0;
             MinSegSegDist(home, node1, node2, node3, node4, &distance2);
 
             group = state->numGroups - 1;
@@ -685,6 +934,7 @@ int SubcyclingSelectSegmentPair(Home_t *home, Node_t *node1, Node_t *node2,
         }
 
         state->pairGroup[key] = group;
+        state->pairDistance2[key] = distance2;
         state->localPairCount[group]++;
     }
 
@@ -757,6 +1007,8 @@ void SubcyclingIntegrator(Home_t *home)
     }
 
     long long numSubcycles = 0;
+    int oldGroup = -1;
+    int nSubcycInGroup = 0;
 
     while (subTime[0] < outerDT) {
         int group = highestGroup - 1;
@@ -765,6 +1017,16 @@ void SubcyclingIntegrator(Home_t *home)
         for (int candidate = highestGroup - 1;
              candidate >= 0; candidate--) {
             if (subTime[candidate] < subTime[group]) group = candidate;
+        }
+
+        /*
+         * Match the ExaDiS driver: switching groups resets both the
+         * consecutive-cycle counter and all oscillation/error node flags.
+         */
+        if (group != oldGroup) {
+            nSubcycInGroup = 0;
+            ResetNodeFlags(home);
+            oldGroup = group;
         }
 
         real8 remaining = outerDT - subTime[group];
@@ -779,14 +1041,24 @@ void SubcyclingIntegrator(Home_t *home)
         real8 attemptDT = MIN(oldNextDT, remaining);
         int clipped = (attemptDT < oldNextDT);
 
-        std::vector<PositionVelocity> beforeVirtual;
-        if (group > 0) beforeVirtual = CapturePositionVelocity(home);
+        std::vector<PositionVelocity> rkfBaseState;
 
-        RKFResult result = AdaptiveRKFStep(home, group, attemptDT);
+        RKFResult result = AdaptiveRKFStep(home, group, attemptDT,
+                                           &rkfBaseState);
         state->realDT[group] = result.acceptedDT;
         state->nextDT[group] = result.nextDT;
 
-        if (group > 0) RestorePositionVelocity(beforeVirtual);
+        /*
+         * Higher groups are virtual in drift mode.  Restore their positions
+         * but retain the accepted virtual-step velocity for the ExaDiS-style
+         * forward-progress test below.
+         */
+        if (group > 0) RestorePositionsOnly(rkfBaseState);
+
+        if (nSubcycInGroup > 3) {
+            ForwardProgressCheck(home, rkfBaseState);
+        }
+        nSubcycInGroup++;
 
         if (clipped && SameTimeStep(result.acceptedDT, attemptDT)) {
             /* A final clipped step must not reduce the next-cycle proposal. */
