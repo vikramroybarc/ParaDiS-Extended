@@ -1,0 +1,7 @@
+Column    Description
+------    -------------------------------------------
+1         Current simulation cycle number
+2         Elapsed simulation time
+3-8       Plastic strain tensor elements in sequence
+          [0][0], [1][1], [2][2], [1][2], [0][1], [0][2]
+9         Dislocation density

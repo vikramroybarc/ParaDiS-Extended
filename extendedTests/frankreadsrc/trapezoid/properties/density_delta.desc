@@ -1,0 +1,35 @@
+Column    Description
+------    -------------------------------------------
+1         Strain
+2         Total incremental gain (sum of columns
+          4 thru 10
+3         Total incremental loss (sum of columns
+          11 thru 17
+4         Density gain: Burgers vectors [-1  1  1]
+                                        [ 1 -1 -1]
+5         Density gain: Burgers vectors [ 1 -1  1]
+                                        [-1  1 -1]
+6         Density gain: Burgers vectors [ 1  1 -1]
+                                        [-1 -1  1]
+7         Density gain: Burgers vectors [ 1  1  1]
+                                        [-1 -1 -1]
+8         Density gain: Burgers vectors [ 1  0  0]
+                                        [-1  0  0]
+9         Density gain: Burgers vectors [ 0  1  0]
+                                        [ 0 -1  0]
+10        Density gain: Burgers vectors [ 0  0  1]
+                                        [ 0  0 -1]
+11        Density loss: Burgers vectors [-1  1  1]
+                                        [ 1 -1 -1]
+12        Density loss: Burgers vectors [ 1 -1  1]
+                                        [-1  1 -1]
+13        Density loss: Burgers vectors [ 1  1 -1]
+                                        [-1 -1  1]
+14        Density loss: Burgers vectors [ 1  1  1]
+                                        [-1 -1 -1]
+15        Density loss: Burgers vectors [ 1  0  0]
+                                        [-1  0  0]
+16        Density loss: Burgers vectors [ 0  1  0]
+                                        [ 0 -1  0]
+17        Density loss: Burgers vectors [ 0  0  1]
+                                        [ 0  0 -1]

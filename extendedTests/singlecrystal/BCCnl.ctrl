@@ -1,0 +1,125 @@
+#
+#  Control File for Simulation Using BCC_nl Mobility
+#
+
+#
+#  Simulation cell and processor setup
+#  
+numXdoms =  2
+numYdoms =  3
+numZdoms =  2
+numXcells =   8
+numYcells =   8 
+numZcells =   8
+#
+#  Load balance every cycle using a recursive-bisection decomposition
+#
+decompType =   2  
+DLBfreq =   1  
+#
+# GPU controls
+gpu_enabled =   1  
+gpu_nstrm =   8
+gpu_nthrd =   1024  
+gpu_npblk =   65536 
+#
+#  Simulation time and timestepping controls
+#  
+maxstep =   10000000  
+timestepIntegrator =   "subcycling"  
+#rTol =   1.250000e+00  
+KINSOL_UseNewton = 0
+KINSOL_PrintLevel = 1
+KINSOL_LogFile = "kinlog"
+#
+#  Discretization controls
+#  
+maxSeg =   2.000000e+02
+minSeg =   5.000000e+01  
+remeshRule =   2  
+#
+#  Fast Multipole Method controls
+#  
+fmEnabled =   1  
+fmMPOrder =   2  
+fmTaylorOrder =   5  
+fmCorrectionTbl =   "fmm6kfe405K.data"  
+#
+#  Loading conditions
+#  
+TempK =   405 
+pressure =   0.000000e+00  
+loadType =   1  
+eRate =   50
+#eRate =   .000000e+03 
+indxErate =   2
+edotdir = [ 1.  0.  0. ]
+#
+#  Material and mobility parameters
+#  
+mobilityLaw =   "BCC_nl"  
+#mobilityLaw =   "Relax"
+# enforceGlidePlanes       = 1 
+ shearModulus =   80.715e9
+ pois =   0.3
+ burgMag =   2.48200e-10  
+ rc =   5.000000e+00  
+# # Ecore =   5.502262e+10  
+MobGlide =   3875
+MobLine =   1e4
+MobDeltaH0 =   6.7068e-20
+MobPeierls =   450e6
+MobAlpha =   0.9615
+MobExpP =   0.5
+MobExpQ =   1.2
+# MobEexpQ = 2 = fixed
+MobCoeffA =  0.5
+MobCoeffC =   0.2  
+MobCoeffC0 =   2000
+MobCoeffD =   1.6269e-04  
+MobClimb =   0.7
+meltTemp = 1500
+#
+# Lab Frame Parameters
+useLabFrame = 0
+rotationMatrix =
+   [
+     0.7071    0.7071         0
+     0.4082   -0.4082   -0.8165 
+     0.5774   -0.5774    0.5774 
+   ]
+#
+# Comments - LabFrameXDir = [1 1 1], LabFrameZDir = [1 -1 0]
+# Rotation Matrix from Crystal Frame to Lab Frame - Source Files of ParaDis
+# Same as GMATINV matrix used in crystal plasticity
+#  I/O controls and parameters
+#  
+dirname =   "OutputSR50sub3"
+#dirname =   "Relax"  
+savecn =   1
+savecnfreq =   100
+gnuplot =   0
+gnuplotcounter =   0
+gnuplotfreq = 100
+saveprop =   1  
+savepropfreq =   100
+savetimers =   0  
+winDefaultsFile =   "paradis.xdefaults"  
+
+
+writeVisit               = 1  
+writeVisitFreq           = 100
+writeVisitCounter        = 1  
+writeVisitSegments       = 1  
+writeVisitSegmentsAsText = 1 
+writeVisitNodes          = 1  
+writeVisitNodesAsText    = 0  
+writeVisitBurgID         = 1  
+writeVisitForceVector    = 1
+writeVisitVelocityVector = 1
+velfile =   1  
+velfilefreq =   100
+
+writeflux = 1
+fluxfreq = 100
+writeFluxFullDecompTotals =   1 

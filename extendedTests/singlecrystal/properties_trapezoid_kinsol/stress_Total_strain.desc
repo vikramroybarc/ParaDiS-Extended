@@ -1,0 +1,6 @@
+Column    Description
+------    -------------------------------------------
+1         Strain
+2         Stress
+3         Elapsed simulation time
+4         Curent simulation cycle number

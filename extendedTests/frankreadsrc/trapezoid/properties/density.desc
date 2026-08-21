@@ -1,0 +1,16 @@
+Column    Description
+------    -------------------------------------------
+1         Plastic strain
+2         Strain
+3         Dislocation density
+4         Deleted dislocation density
+5         Average dislocation velocity
+6         Std deviation of dislocation velocity
+7         File version number
+8         Burgers vectors [1 1 1] [-1 -1 -1]
+9         Burgers vectors [-1 1 1] [1 -1 -1]
+10        Burgers vectors [1 -1 1] [-1 1 -1]
+11        Burgers vectors [1 1 -1] [-1 -1 1]
+12        Burgers vectors [1 0 0] [-1 0 0]
+                          [0 1 0] [0 -1 0]
+                          [0 0 1] [0 0 -1]

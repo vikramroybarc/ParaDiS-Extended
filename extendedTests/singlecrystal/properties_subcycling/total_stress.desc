@@ -1,0 +1,10 @@
+Column    Description
+------    -------------------------------------------
+1         Current simulation cycle number
+2         Current simulation time
+3         Applied stress: sigma11
+4         Applied stress: sigma22
+5         Applied stress: sigma33
+6         Applied stress: sigma23
+7         Applied stress: sigma31
+8         Applied stress: sigma12
