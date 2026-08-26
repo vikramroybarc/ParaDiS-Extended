@@ -1,0 +1,401 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,mathtools,bm}
+\usepackage{booktabs,tabularx,array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!55!black,
+  urlcolor=blue!65!black,
+  citecolor=blue!55!black,
+  pdftitle={BCC Binary-Junction Node Splitting in ParaDiS}
+}
+
+\setlist{nosep,leftmargin=*}
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+\newcommand{\vect}[1]{\bm{#1}}
+
+\title{BCC Binary-Junction Node Splitting in ParaDiS}
+\author{ParaDiS-Extended Development Notes}
+\date{August 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This note documents the implementation of three-arm BCC binary-junction
+splitting in the serial and parallel ParaDiS topology paths.  The port follows
+the ExaDiS/OpenDiS implementation pinned at commit
+\code{351607fa0f04aa34d29ee253438edde994473fd6}, with adaptations for ParaDiS
+node constraints, remeshing, and its serialized cross-domain operation list.
+It also describes the supplied one-step regression fixture and the topology
+expected after a successful split.
+\end{abstract}
+
+\tableofcontents
+
+\section{Scope and reference implementation}
+
+The change extends the existing multi-node separation machinery, which
+previously considered nodes with at least four arms, to one physically
+specific degree-three case: a non-planar BCC binary junction.  Both topology
+selectors use the same classifier, arm-set restriction, mobility test,
+acceptance threshold, split geometry, and corner-node semantics.
+
+The source behavior was compared against the pinned upstream topology code:
+
+\begin{center}
+\url{https://github.com/llnl/exadis/tree/351607fa0f04aa34d29ee253438edde994473fd6/src/topology_types}
+\end{center}
+
+The algorithm is ported rather than copied mechanically.  ParaDiS has a
+different ownership model and communicates topology changes through a packed
+remote-operation stream, so explicit propagation of the new node constraint
+is required here.
+
+\section{Binary-junction recognition}
+
+\subsection{Topological and Burgers-vector tests}
+
+The shared function
+\code{BCC_binary_junction_node(Home_t*, Node_t*, real8[3], int*)} rejects a
+node unless it has exactly three arms.  For arm $i$, the minimum-image line
+direction is
+\begin{equation}
+  \vect{t}_i =
+  \frac{\operatorname{ZImage}(\vect{x}_i-\vect{x}_0)}
+       {\left\lVert\operatorname{ZImage}(\vect{x}_i-\vect{x}_0)\right\rVert}.
+\end{equation}
+Degenerate arms and missing neighbors cannot form a valid candidate.  An arm
+is classified as the junction arm when
+\begin{equation}
+  \lVert\vect{b}_i\rVert > 1 + 10^{-12}.
+\end{equation}
+The node is a binary junction only when exactly one arm passes this test and
+the remaining two are non-junction arms (called glide arms by the topology
+implementation).  This magnitude test does not independently validate a
+glissile Burgers-vector family.  The classifier returns the junction arm
+index and its unit line direction $\vect{t}_{\mathrm{j}}$.
+
+Candidate construction adds the following guards:
+\begin{itemize}
+  \item the material must be BCC and \code{split3node} must be enabled;
+  \item planar junctions are excluded;
+  \item surface and pinned nodes are excluded; and
+  \item the existing short-segment filter must pass.
+\end{itemize}
+
+\subsection{Five-degree planarity test}
+
+For each glide arm, the parent-plane normal is formed as
+\begin{equation}
+  \vect{n}_i = \vect{b}_i \times \vect{t}_i.
+\end{equation}
+An arm is treated as edge-bearing when
+$\vect{n}_i\mathbin{\cdot}\vect{n}_i>10^{-2}$.  With
+$\theta_{\mathrm{tol}}=5^{\circ}$, the junction is classified as planar as
+follows:
+
+\begin{itemize}
+  \item For two edge-bearing parents, normalize
+        $\vect{d}=\vect{n}_1\times\vect{n}_2$ and require
+        $\bigl|\,|\vect{d}\cdot\vect{t}_{\mathrm{j}}|-1\,\bigr|
+        <1-\cos\theta_{\mathrm{tol}}$.
+  \item For one edge-bearing parent, require
+        $|\vect{n}_1\cdot\vect{t}_{\mathrm{j}}|<
+        \sin\theta_{\mathrm{tol}}$.
+  \item If both parents are screw-like, the junction is planar by
+        convention.
+\end{itemize}
+
+Only a recognized junction for which this planarity result is false proceeds
+to split evaluation.
+
+\section{Split construction and acceptance}
+
+\subsection{Allowed arm set}
+
+\code{SMNGetArmSets()} now supports degree-three nodes.  It produces the three
+possible two-arm selections, while preserving the normal combinatorial
+enumeration for larger nodes.  For a binary junction, evaluation retains only
+the selection containing the two glide arms; the junction arm must remain on
+the other trial node.  The split therefore produces one degree-three node and
+one degree-two node connected by the newly created segment.
+
+\subsection{Trial mobility and geometry}
+
+The trial split initially creates two coincident nodes and reuses the saved
+arm forces.  Mobility is evaluated for both nodes, the existing junction
+force/velocity adjustment is applied, and the velocity of the degree-two
+trial node is set to zero.  This is the binary-junction boundary condition
+used by the reference implementation.  Mobility return codes are combined so
+an error from either trial node rejects the candidate.
+
+The candidate nodes are then separated along the accepted trial direction.
+The required total separation is
+\begin{equation}
+  d_{\mathrm{split}} = 2r_{\mathrm{ann}} + 10^{-12}.
+\end{equation}
+If both nodes move, each moves by half this distance; otherwise the mobile
+node moves by the full distance.  Normalization in the opposite-velocity
+case is guarded against a zero norm, and the existing glide-plane rule is
+retained.  The evaluated trial positions are saved and reused for the final
+three-arm split instead of being recomputed by the general
+\code{CalcJunctionLen()} path.  The small positive offset prevents the new
+connector from lying exactly on the immediate remesh threshold.
+
+\subsection{Energetic and kinematic acceptance}
+
+Let $\vect{f}_k$ and $\vect{v}_k$ be the force and velocity of trial node
+$k$.  The split power is evaluated as
+\begin{equation}
+  P_{\mathrm{s}} =
+  \vect{f}_1\!\cdot\!\vect{v}_1+
+  \vect{f}_2\!\cdot\!\vect{v}_2-
+  v_{\mathrm{noise}}
+  \left(\lVert\vect{f}_1\rVert+\lVert\vect{f}_2\rVert\right),
+\end{equation}
+where
+\begin{equation}
+  v_{\mathrm{noise}} =
+  \code{splitMultiNodeAlpha}\,
+  \frac{\code{rTol}}{\code{deltaTT}}.
+\end{equation}
+The relative velocity must point along the proposed separation direction.
+The binary-junction candidate is accepted only if it improves upon the best
+power by more than the numerical tolerance and also satisfies
+$P_{\mathrm{s}}>1$.  The latter threshold is specific to degree-three
+candidates and prevents marginal splits from being selected.
+
+\section{Serial topology path}
+
+The serial implementation resides primarily in \path{src/Topology.cc}:
+
+\begin{enumerate}
+  \item \code{SplitMultiNodes()} admits degree-three candidates only through
+        the shared BCC classifier and the eligibility guards above.
+  \item The existing node/neighbor backup and temporary \code{SplitNode()}
+        workflow evaluates the single meaningful glide-arm separation.
+  \item The degree-two trial velocity, split-power threshold, and saved trial
+        positions apply only to the binary-junction case; behavior for nodes
+        with four or more arms remains on the established path.
+  \item After the final split succeeds, whichever result has degree two is
+        marked \code{CORNER_NODE} and its complete constraint value is queued
+        for remote domains when the operation is global.
+\end{enumerate}
+
+Temporary arm storage was enlarged to hold both selected glide arms for a
+three-arm split, and temporary reposition flags are initialized before each
+evaluation.  These details avoid under-allocation and stale-state behavior
+when the new, smaller topology enters code originally sized for nodes of
+degree four or greater.
+
+\section{Parallel topology path}
+
+The parallel selector continues to use the staged
+\code{SplitMultiNodesParallel()} workflow:
+
+\begin{enumerate}
+  \item \code{BuildGhostMultiNodeList()} and
+        \code{BuildLocalMultiNodeList()} call the same splittability predicate
+        for native and ghost degree-three nodes.
+  \item \code{SMNEvalSplitForces()} constructs the eligible trial and computes
+        each domain's partial segment forces.
+  \item The existing force-buffer exchange reduces those contributions onto
+        the owning domain.
+  \item \code{SMNEvalMultiNodeSplits()} performs the final mobility,
+        separation, power, and direction tests and executes the winning split.
+\end{enumerate}
+
+All three degree-three split-info slots remain present in the communication
+layout, but the two arm sets containing the junction arm are skipped.  Keeping
+the full slot indexing makes force packing and unpacking consistent across
+domains.  The parallel evaluation mirrors the serial fixes: adequate arm and
+force storage, combined mobility status, guarded velocity normalization,
+zero degree-two velocity, the $P_{\mathrm{s}}>1$ threshold, saved final
+positions, and corner marking after a successful split.
+
+In a non-\code{PARALLEL} build, initialization forces
+\code{useParallelSplitMultiNode} to zero.  Thus the parallel selector is only
+meaningful when ParaDiS was compiled with parallel topology support.
+
+\section{Corner preservation and remeshing}
+
+\code{CORNER_NODE} is the constraint bit \code{0x00000010} (decimal 16).  It
+identifies the physical degree-two corner created by a successful binary
+junction split.  The bit is included in the valid constraint mask.  During
+topology initialization and native/ghost candidate-list construction, stale
+corner markers are removed from nodes observed with a degree other than two.
+
+Both remesh coarsening paths apply the same length rule.  An edge touching a
+corner may be merged only when
+\begin{equation}
+  L \leq 2r_{\mathrm{ann}}.
+\end{equation}
+The candidate phase avoids selecting a corner whose two attached edges are
+both longer than that limit.  The execution phase gates the two neighboring
+edges independently, so arbitrary arm ordering cannot cause a long
+corner-attached edge to collapse merely because the other edge is short.
+Very short pathological segments may still be removed.
+
+\section{Cross-domain constraint propagation}
+
+ParaDiS topology operations are replayed on neighboring MPI domains before
+the immediate remesh stage.  The new append-only operation
+\code{REM_OP_RESET_CONSTRAINT} carries a node tag and the complete integer
+constraint value:
+
+\begin{enumerate}
+  \item \code{SplitNode()} first emits its existing create/connectivity
+        operations.
+  \item The successful serial or parallel caller marks the degree-two node
+        and appends \code{AddOpResetConstraint()}.
+  \item \code{FixRemesh()} replays the byte stream in order, so a newly created
+        ghost exists before its constraint is reset.
+\end{enumerate}
+
+Appending the enumeration value preserves the numeric identifiers of all
+pre-existing remote operations.  Nevertheless, the packed operation stream
+is an executable-level protocol: every MPI rank must use the same rebuilt
+binary.
+
+\section{Control parameters}
+
+\begin{table}[ht]
+\centering
+\begin{tabularx}{\textwidth}{@{}>{\ttfamily}l X@{}}
+\toprule
+\normalfont Parameter & Meaning \\
+\midrule
+split3node & Boolean switch for eligible BCC three-arm binary-junction
+splitting.  The default is 1 (enabled), and input is normalized to zero or
+one. \\
+useParallelSplitMultiNode & Selects the topology implementation: 0 uses
+\code{SplitMultiNodes()}, while 1 uses \code{SplitMultiNodesParallel()} in a
+\code{PARALLEL} build. \\
+splitMultiNodeFreq & Existing cadence controlling which cycles evaluate
+multi-node splits. \\
+rann & Existing annihilation distance; the new split and corner-remesh
+thresholds are defined from $2r_{\mathrm{ann}}$. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+No new material type or mobility law is introduced.  The feature activates
+only when the existing material selection is BCC.
+
+\section{Implementation map}
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{0.35\textwidth} X@{}}
+\toprule
+Files & Responsibility \\
+\midrule
+\path{include/Node.h}, \path{src/Initialize.cc} & Define and validate
+\code{CORNER_NODE}. \\
+\path{include/Param.h}, \path{src/Param.cc},
+\path{src/InputSanity.cc}, \path{src/ParadisInit.cc} & Bind, normalize, and
+report \code{split3node}. \\
+\path{include/Topology.h}, \path{src/Topology.cc} & Shared classifier and
+serial split implementation. \\
+\path{src/SMNSupport.cc}, \path{src/SplitMultiNodesParallel.cc} & Parallel
+candidate lists, arm sets, and orchestration. \\
+\path{src/SMNEvalSplitForces.cc},
+\path{src/SMNEvalMultiNodeSplits.cc} & Distributed trial-force evaluation and
+owning-domain split selection. \\
+\path{src/Remesh.cc} & Corner-aware candidate and per-edge coarsening gates. \\
+\path{include/OpList.h}, \path{src/RemoteOps.cc}, \path{src/FixRemesh.cc} &
+Serialize, emit, and replay full constraint resets. \\
+\path{tests/bcc_binary_junction_node.ctrl},
+\path{tests/bcc_binary_junction_node.data} & One-step regression control and
+four-node input network. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Regression fixture}
+
+\subsection{Input geometry}
+
+The data file contains four nodes in a periodic box.  The central node has
+one $\langle100\rangle$ junction arm of magnitude approximately 1.1547 and
+two $\tfrac12\langle111\rangle$ glide arms of unit magnitude.  Their line
+directions make the junction non-planar under the five-degree classifier.
+The three endpoint nodes are pinned so the one-step test isolates the
+topology operation from endpoint motion.
+
+The control file selects \code{BCC_0}, enables \code{split3node}, evaluates
+multi-node splitting every cycle, applies a $zz$ stress of
+$5\times10^8$, and runs one step.  It defaults to the serial selector.
+
+\subsection{Commands}
+
+Run from the repository's \path{tests} directory:
+
+\begin{verbatim}
+../bin/paradis -d bcc_binary_junction_node.data \
+    bcc_binary_junction_node.ctrl
+\end{verbatim}
+
+Set \code{useParallelSplitMultiNode = 1} in the control file to exercise the
+parallel topology selector.  For the MPI ownership/remote-operation check,
+use a \code{PARALLEL} build and run:
+
+\begin{verbatim}
+mpirun -n 2 ../bin/paradis -doms 2 1 1 \
+    -d bcc_binary_junction_node.data \
+    bcc_binary_junction_node.ctrl
+\end{verbatim}
+
+\subsection{Expected result}
+
+After one step, the restart under
+\path{bcc_binary_junction_node_results/restart/restart.data} must contain:
+
+\begin{itemize}
+  \item five nodes in total;
+  \item the three original pinned degree-one endpoints;
+  \item exactly one degree-two node with constraint 16
+        (\code{CORNER_NODE}); and
+  \item the surviving degree-three node without the corner constraint.
+\end{itemize}
+
+The serial and parallel one-rank paths should produce the same restart
+topology.  The two-rank run additionally checks that the degree-two corner
+constraint survives ownership and ghost replay before remeshing.
+
+\subsection{Validation performed}
+
+The final regression review exercised both complete build configurations and
+all relevant topology/ownership combinations:
+
+\begin{itemize}
+  \item serial and \code{PARALLEL} builds completed successfully;
+  \item one-rank runs with topology selectors 0 and 1 produced byte-identical
+        restart data;
+  \item two-rank MPI runs completed with both topology selectors; and
+  \item the final restart contained the five-node topology and unique
+        degree-two constraint-16 corner described above.
+\end{itemize}
+
+\section{Compatibility boundaries}
+
+This implementation deliberately does not generalize three-arm splitting.
+It applies only to BCC nodes matching the exact binary-junction signature and
+rejects planar, pinned, surface, degenerate, and short-segment candidates.
+Nodes with four or more arms retain their prior multi-node split behavior.
+Because \code{CORNER_NODE} is meaningful only for degree-two nodes, topology
+list construction removes the bit from any node whose degree later changes.
+
+\end{document}

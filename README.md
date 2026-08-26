@@ -34,15 +34,19 @@ The implementation:
 
 The primary implementation is:
 
-```
-
+```text
 MobilityLaw_BCC_nl_Eshelby_SegmentResist.cc
-
-````
+```
 
 ### 3. Eshelby-Compatible Subcycling
 
 The subcycling implementation is designed to operate with simulations containing Eshelby inclusions, allowing inclusion forces and modified mobility behavior to be used together with force subcycling.
+
+### 4. BCC Binary Junction Node Splitting
+
+BCC three-arm binary junctions can now be split by both the serial and parallel multi-node topology paths, following the pinned [ExaDiS/OpenDiS topology implementation](https://github.com/llnl/exadis/tree/351607fa0f04aa34d29ee253438edde994473fd6/src/topology_types). The implementation identifies eligible non-planar BCC junctions, evaluates the glide-arm split energetics, marks the resulting degree-two corner node so remeshing preserves the physical junction geometry, and propagates that constraint across MPI domains.
+
+The feature is controlled by `split3node` (enabled by default). Set `useParallelSplitMultiNode = 0` for the serial topology path or `1` for the parallel path in a `PARALLEL` build. Regression inputs are [`tests/bcc_binary_junction_node.ctrl`](tests/bcc_binary_junction_node.ctrl) and [`tests/bcc_binary_junction_node.data`](tests/bcc_binary_junction_node.data). See [`docs/BCC_Binary_Junction_Node_Splitting.tex`](docs/BCC_Binary_Junction_Node_Splitting.tex) for implementation and validation details.
 
 ## Building
 
@@ -50,7 +54,25 @@ The build procedure is the same as the base LLNL ParaDiS distribution. Configure
 
 ```bash
 make
-````
+```
+
+## BCC Binary-Junction Regression Test
+
+Run the one-step fixture from the `tests` directory:
+
+```bash
+cd tests
+../bin/paradis -d bcc_binary_junction_node.data bcc_binary_junction_node.ctrl
+```
+
+The supplied control file uses the serial topology path. Change `useParallelSplitMultiNode` to `1` to exercise the parallel topology path in a `PARALLEL` build. To validate cross-domain constraint propagation, run the same fixture on two ranks:
+
+```bash
+mpirun -n 2 ../bin/paradis -doms 2 1 1 \
+  -d bcc_binary_junction_node.data bcc_binary_junction_node.ctrl
+```
+
+A successful one-step run writes a restart containing five nodes: the three original pinned degree-one endpoints, one unconstrained degree-three node, and one degree-two node carrying constraint `16` (`CORNER_NODE`).
 
 ## Base Code
 
@@ -61,4 +83,3 @@ For the original ParaDiS documentation, build instructions, examples, and citati
 ## License
 
 The original ParaDiS code is released under the BSD-3 license. See [LICENSE](LICENSE) for details.
-
