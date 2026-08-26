@@ -1,0 +1,1225 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,mathtools,bm}
+\usepackage{booktabs,tabularx,array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+
+\definecolor{codebg}{RGB}{247,247,247}
+\definecolor{codeframe}{RGB}{205,205,205}
+\definecolor{codecomment}{RGB}{0,105,75}
+\definecolor{codekeyword}{RGB}{25,65,145}
+
+\lstdefinestyle{base}{
+  basicstyle=\ttfamily\footnotesize,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  breaklines=true,
+  breakatwhitespace=false,
+  frame=single,
+  rulecolor=\color{codeframe},
+  backgroundcolor=\color{codebg},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=7pt,
+  xleftmargin=1.5em,
+  framexleftmargin=1em,
+  aboveskip=0.8em,
+  belowskip=0.8em
+}
+
+\lstdefinestyle{cpp}{
+  style=base,
+  language=C++,
+  keywordstyle=\color{codekeyword}\bfseries,
+  commentstyle=\color{codecomment},
+  stringstyle=\color{purple!65!black}
+}
+
+\lstdefinestyle{data}{
+  style=base,
+  language={}
+}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!55!black,
+  urlcolor=blue!65!black,
+  citecolor=blue!55!black,
+  pdftitle={BCC Binary-Junction Node Splitting in ParaDiS}
+}
+
+\setlist{nosep,leftmargin=*}
+\setcounter{tocdepth}{2}
+\allowdisplaybreaks
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+\newcommand{\vect}[1]{\bm{#1}}
+
+\title{BCC Binary-Junction Node Splitting in ParaDiS\\
+       \large File-by-File Code and Design Guide}
+\author{ParaDiS-Extended Development Notes}
+\date{August 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This note documents the implementation of three-arm BCC binary-junction
+splitting in the serial and parallel ParaDiS topology paths.  Unlike a
+high-level feature summary, it shows the code added or changed in every
+implementation and regression file and explains the purpose of each change.
+The port follows the ExaDiS/OpenDiS implementation pinned at commit
+\code{351607fa0f04aa34d29ee253438edde994473fd6}, with ParaDiS-specific
+adaptations for node constraints, remeshing, and serialized cross-domain
+topology operations.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Scope, lineage, and reading convention}
+
+The functional implementation is the difference from the pre-feature base
+\code{efd4069bfb9540a2ed76ccbe9892ed2c441597f7} through
+\code{3cb6c8bd92d7407a5b80b595d116574dc6b86f7f}.  The first implementation
+commit is \code{74f18516eb24587c65d123e77a9713c71f38d2f0}; the second completes MPI
+constraint propagation, remesh protection, and the regression fixture.  The
+exact change set can be inspected with:
+
+\begin{lstlisting}[style=data]
+git diff efd4069bfb9540a2ed76ccbe9892ed2c441597f7 \
+         3cb6c8bd92d7407a5b80b595d116574dc6b86f7f -- \
+         include src tests
+\end{lstlisting}
+
+The pinned reference is available at:
+
+\begin{center}
+\url{https://github.com/llnl/exadis/tree/351607fa0f04aa34d29ee253438edde994473fd6/src/topology_types}
+\end{center}
+
+Every changed file has a subsection below.  Listings reproduce the final
+code for the introduced behavior, with only enough surrounding context to
+make each fragment understandable.  Large functions are divided into focused
+fragments rather than copied wholesale.  Therefore the listings are a design
+and change guide, while the repository source remains authoritative.  Long
+source lines are occasionally reindented to fit the page without changing
+their meaning.  Comments beginning with ``Existing'' are editorial elisions,
+not new comments in the C++ source.
+
+The 17 changed implementation and test files fall into five groups:
+
+\begin{itemize}
+  \item public definitions: four headers under \path{include};
+  \item parameter and initialization plumbing: four source files;
+  \item serial and parallel topology evaluation: four source files;
+  \item remesh and MPI propagation: three source files; and
+  \item regression inputs: one control file and one nodal-data file.
+\end{itemize}
+
+\section{Public definitions and interfaces}
+
+\subsection{\texttt{include/Node.h}}
+
+\paragraph{New lines, with existing enumeration entries shown for context.}
+
+\begin{lstlisting}[style=cpp]
+#define CORNER_NODE         0x00000010   /* 16: Preserve a physical corner */
+                                         /*     during mesh coarsening.     */
+\end{lstlisting}
+
+\paragraph{Meaning.}
+The new constraint bit marks the degree-two node created by a successful
+binary-junction split.  It is a topology state, not a temporary flag: remesh
+uses it to distinguish a physical kink from an ordinary degree-two node that
+may be coarsened away.  Decimal value 16 is deliberately disjoint from the
+existing pinning and surface bits.
+
+\subsection{\texttt{include/Param.h}}
+
+\paragraph{Code added.}
+
+\begin{lstlisting}[style=cpp]
+int split3node;                /* Toggle BCC binary-junction */
+                               /* three-arm node splitting. */
+\end{lstlisting}
+
+\paragraph{Meaning.}
+This member carries the runtime control-file switch through \code{Param_t}.
+It lets a user enable or disable degree-three BCC splitting without changing
+the established treatment of nodes with four or more arms.
+
+\subsection{\texttt{include/Topology.h}}
+
+\paragraph{Code added.}
+
+\begin{lstlisting}[style=cpp]
+int BCC_binary_junction_node(Home_t *home, Node_t *node,
+        real8 tjunc[3], int *planarJunc);
+\end{lstlisting}
+
+\paragraph{Meaning.}
+The declaration exposes one shared classifier to the serial topology path and
+the parallel candidate/force stages.  The return value is the junction-arm
+index or $-1$.  The output vector \code{tjunc} is the unit junction-line
+direction, and \code{planarJunc} reports whether the parent-plane geometry is
+planar and therefore excluded from this split mechanism.
+
+\subsection{\texttt{include/OpList.h}}
+
+\paragraph{Code added.}
+
+\begin{lstlisting}[style=cpp]
+typedef enum {
+        REM_OP_CHANGE_CONN,
+        REM_OP_INSERT_ARM,
+        REM_OP_REMOVE_NODE,
+        REM_OP_CHANGE_BURG,
+        REM_OP_SPLIT_NODE,
+        REM_OP_RESET_COORD,
+        REM_OP_RESET_SEG_FORCE1,
+        REM_OP_RESET_SEG_FORCE2,
+        REM_OP_MARK_FORCE_OBSOLETE,
+        REM_OP_RESET_PLANE,
+        REM_OP_RESET_CONSTRAINT
+} OpType_t;
+
+typedef struct {
+    int   opType;
+    Tag_t tag1;
+    int   constraint;
+} RemOpResetConstraint_t;
+
+void AddOpResetConstraint(Home_t *home, Tag_t *tag1, int constraint);
+\end{lstlisting}
+
+\paragraph{Meaning.}
+ParaDiS communicates topology changes as packed operation records.  The new
+record transmits a node tag plus the complete integer constraint bitmask.  Its
+operation identifier is appended to the enumeration, preserving the numeric
+values of all existing operation types.  All MPI ranks must still run the
+same rebuilt executable because the byte-stream protocol now includes this
+record.
+
+\section{Parameter and initialization plumbing}
+
+\subsection{\texttt{src/Initialize.cc}}
+
+\paragraph{Code changed.}
+
+\begin{lstlisting}[style=cpp]
+allValidConstraints = PINNED_X | PINNED_Y | PINNED_Z |
+                      SURFACE_NODE | CORNER_NODE |
+                      MULTI_JUNCTION_NODE |
+                      LOOP_NODE | CROSS_NODE;
+\end{lstlisting}
+
+\paragraph{Meaning.}
+Restart and input validation now accepts constraint bit 16.  Without this
+addition, a restart written after a binary-junction split would be rejected as
+containing an unknown node constraint.
+
+\subsection{\texttt{src/InputSanity.cc}}
+
+\paragraph{Code added.}
+
+\begin{lstlisting}[style=cpp]
+param->split3node = (param->split3node != 0);
+\end{lstlisting}
+
+\paragraph{Meaning.}
+Any nonzero input is normalized to one.  Downstream candidate logic can treat
+\code{split3node} as a strict Boolean rather than preserving arbitrary
+integer values from a control file.
+
+\subsection{\texttt{src/ParadisInit.cc}}
+
+\paragraph{Code added.}
+
+\begin{lstlisting}[style=cpp]
+printf("|   split BCC three-arm nodes    : %s\n",
+       p->split3node ? "yes" : "no");
+\end{lstlisting}
+
+\paragraph{Meaning.}
+The startup summary makes the effective state visible before stepping begins.
+This is especially useful when comparing otherwise identical serial-selector
+and parallel-selector regression runs.
+
+\subsection{\texttt{src/Param.cc}}
+
+\paragraph{Code added or changed.}
+
+\begin{lstlisting}[style=cpp]
+BindVar(CPList, "split3node", &param->split3node,
+        V_INT, 1, VFLAG_NULL);
+param->split3node = 1;
+
+printf("   splitMultiNodeAlpha                  : %+lf\n",
+       p->splitMultiNodeAlpha);
+printf("   split3node                           : %d\n\n",
+       p->split3node);
+\end{lstlisting}
+
+\paragraph{Meaning.}
+\code{CtrlParamInit()} registers the control keyword and enables it by
+default.  \code{Print_Param()} includes the value in the detailed parameter
+dump.  Existing control files therefore gain the feature automatically, while
+\code{split3node = 0} restores the former degree-four minimum.
+
+\section{Shared classifier and serial topology path}
+
+\subsection{\texttt{src/Topology.cc}}
+
+This file contains the shared BCC classifier and the serial implementation in
+\code{SplitMultiNodes()}.
+
+\subsubsection{Removing stale corner state}
+
+\paragraph{Code added.}
+
+\begin{lstlisting}[style=cpp]
+if (HAS_ANY_OF_CONSTRAINTS(localNode->constraint, CORNER_NODE) &&
+    (localNode->numNbrs != 2)) {
+    REMOVE_CONSTRAINTS(localNode->constraint, CORNER_NODE);
+}
+
+if (HAS_ANY_OF_CONSTRAINTS(ghostNode->constraint, CORNER_NODE) &&
+    (ghostNode->numNbrs != 2)) {
+    REMOVE_CONSTRAINTS(ghostNode->constraint, CORNER_NODE);
+}
+\end{lstlisting}
+
+\paragraph{Meaning.}
+\code{InitTopologyExemptions()} enforces the invariant that a corner marker is
+meaningful only on a degree-two node.  If a later collision or topology event
+changes the degree, native and ghost copies lose stale corner state during the
+next \code{InitTopologyExemptions()} pass.
+
+\subsubsection{Recognizing a BCC binary junction}
+
+\paragraph{Code added or moved, with both adjustment calls shown for
+context.}
+
+\begin{lstlisting}[style=cpp]
+int BCC_binary_junction_node(Home_t *home, Node_t *node,
+                             real8 tjunc[3], int *planarJunc)
+{
+        int     armID;
+        int     binaryJunc;
+        int     numArmEdge, numArmGlide, numArmJunc;
+        real8   ndir[3][3];
+        real8   eps, angleTol;
+        Param_t *param;
+
+        binaryJunc = -1;
+        numArmEdge = 0;
+        numArmGlide = 0;
+        numArmJunc = 0;
+
+        VECTOR_ZERO(tjunc);
+        *planarJunc = 0;
+
+        if ((node == (Node_t *)NULL) || (node->numNbrs != 3)) {
+            return(-1);
+        }
+
+        param = home->param;
+        eps = 1.0e-12;
+        angleTol = 5.0 * M_PI / 180.0;
+
+        for (armID = 0; armID < node->numNbrs; armID++) {
+            real8  bMag, lineMag2;
+            real8  burg[3], lineDir[3], normal[3];
+            Node_t *nbrNode;
+
+            nbrNode = GetNeighborNode(home, node, armID);
+
+            if (nbrNode == (Node_t *)NULL) {
+                continue;
+            }
+
+            lineDir[X] = nbrNode->x - node->x;
+            lineDir[Y] = nbrNode->y - node->y;
+            lineDir[Z] = nbrNode->z - node->z;
+
+            ZImage(param, &lineDir[X], &lineDir[Y], &lineDir[Z]);
+            lineMag2 = DotProduct(lineDir, lineDir);
+
+            if (lineMag2 < eps) {
+                continue;
+            }
+
+            NormalizeVec(lineDir);
+
+            burg[X] = node->burgX[armID];
+            burg[Y] = node->burgY[armID];
+            burg[Z] = node->burgZ[armID];
+            bMag = Normal(burg);
+
+            if (bMag > (1.0 + eps)) {
+                VECTOR_COPY(tjunc, lineDir);
+                binaryJunc = armID;
+                numArmJunc++;
+            } else {
+                CrossVector(burg, lineDir, normal);
+
+                if (fabs(DotProduct(normal, normal)) > 1.0e-2) {
+                    VECTOR_COPY(ndir[numArmEdge], normal);
+                    numArmEdge++;
+                }
+
+                numArmGlide++;
+            }
+        }
+
+        if ((numArmJunc == 1) && (numArmGlide == 2)) {
+            if (numArmEdge == 2) {
+                real8 collinearTol, tdir[3];
+
+                collinearTol = 1.0 - cos(angleTol);
+                CrossVector(ndir[0], ndir[1], tdir);
+                NormalizeVec(tdir);
+
+                *planarJunc =
+                    (fabs(fabs(DotProduct(tdir, tjunc)) - 1.0) <
+                     collinearTol);
+            } else if (numArmEdge == 1) {
+                *planarJunc =
+                    (fabs(DotProduct(ndir[0], tjunc)) < sin(angleTol));
+            } else {
+                *planarJunc = 1;
+            }
+        } else {
+            binaryJunc = -1;
+        }
+
+        return(binaryJunc);
+}
+\end{lstlisting}
+
+\paragraph{Meaning.}
+The classifier requires exactly one arm with
+$\lVert\vect b\rVert>1+10^{-12}$ and two remaining non-junction arms.  Each
+line direction is minimum-imaged and normalized.  For the two non-junction
+arms it constructs $\vect n=\vect b\times\vect t$ and treats
+$\lVert\vect n\rVert^2>10^{-2}$ as edge-bearing.  A five-degree tolerance
+then tests whether the junction direction follows the intersection of two
+parent planes, lies in the sole edge parent plane, or has two screw parents.
+Those cases are planar and are not split.  The magnitude test calls the two
+remaining arms ``glide'' arms in the implementation; it does not independently
+validate a glissile Burgers-vector family.
+
+\subsubsection{Admitting the serial degree-three candidate}
+
+\paragraph{Code added or changed.}
+
+\begin{lstlisting}[style=cpp]
+int binaryJunc = -1;
+
+if (HAS_ANY_OF_CONSTRAINTS(node->constraint, CORNER_NODE) &&
+    (node->numNbrs != 2)) {
+    REMOVE_CONSTRAINTS(node->constraint, CORNER_NODE);
+}
+
+if (node->numNbrs < 3) continue;
+
+if (node->numNbrs == 3) {
+    int   planarJunc;
+    real8 tjunc[3];
+
+    if ((!param->split3node) ||
+        (param->materialType != MAT_TYPE_BCC)) {
+        continue;
+    }
+
+    binaryJunc = BCC_binary_junction_node(home, node, tjunc,
+                                           &planarJunc);
+
+    if ((binaryJunc < 0) || planarJunc) continue;
+}
+
+if (HAS_ANY_OF_CONSTRAINTS(node->constraint, SURFACE_NODE)) {
+    continue;
+}
+
+if (HAS_ANY_OF_CONSTRAINTS(node->constraint, PINNED_NODE)) {
+    continue;
+}
+\end{lstlisting}
+
+\paragraph{Meaning.}
+The serial candidate floor changes from degree four to degree three, but the
+new degree-three path is narrow: it requires the switch, BCC material, a
+recognized non-planar binary junction, and an unpinned/non-surface node.  The
+existing short-segment and cycle-frequency checks still apply later in the
+function.
+
+\subsubsection{Selecting only the two non-junction arms}
+
+\paragraph{Code changed.}
+
+\begin{lstlisting}[style=cpp]
+armList  = (int *)calloc(1, (nbrs - 1) * sizeof(int));
+armList2 = (int *)calloc(1, (nbrs - 1) * sizeof(int));
+
+for (j = 0; j < numSets; j++) {
+    int tmpRepositionNode1, tmpRepositionNode2;
+
+    if ((nbrs == 3) && (armSets[j][binaryJunc] != 0)) {
+        continue;
+    }
+
+    /* Existing trial-split evaluation follows. */
+}
+\end{lstlisting}
+
+\paragraph{Meaning.}
+Two selected arms must fit in the work arrays, hence
+\code{nbrs - 1} instead of \code{nbrs - 2}.  The pre-existing split-count
+table already contains three combinations for a degree-three node.  The new
+filter discards the two combinations containing the junction arm, leaving
+only the trial that moves both non-junction arms.
+
+\subsubsection{Degree-two mobility boundary condition}
+
+\paragraph{Code added.}
+
+\begin{lstlisting}[style=cpp]
+AdjustJuncNodeForceAndVel(home, splitNode1, &mobArgs1);
+AdjustJuncNodeForceAndVel(home, splitNode2, &mobArgs2);
+
+if (nbrs == 3) {
+    Node_t *twoNode =
+        (splitNode1->numNbrs == 2) ? splitNode1 :
+        ((splitNode2->numNbrs == 2) ? splitNode2 :
+         (Node_t *)NULL);
+
+    if (twoNode != (Node_t *)NULL) {
+        twoNode->vX = 0.0;
+        twoNode->vY = 0.0;
+        twoNode->vZ = 0.0;
+    }
+}
+\end{lstlisting}
+
+The same zeroing block is applied again after the repositioned trial has its
+mobility recomputed.
+
+\paragraph{Meaning.}
+Both trial nodes receive the established junction force/velocity adjustment.
+For this binary split, the resulting degree-two corner is stationary during
+the energetic test, matching the reference boundary condition and preventing
+it from contributing artificial power.
+
+\subsubsection{Guarding direction and accepting power}
+
+\paragraph{Code added or changed.}
+
+\begin{lstlisting}[style=cpp]
+if (((nbrs != 3) || !param->enforceGlidePlanes) &&
+    (vd1 > eps) && (vd2 > eps) &&
+    (fabs(vel1Dotvel2/vd1Sqrt/vd2Sqrt+1.0) < 0.01)) {
+    /* Existing equal-and-opposite velocity handling. */
+}
+
+if (((powerTest - powerMax) > eps) &&
+    ((nbrs != 3) || (powerTest > 1.0))) {
+    vel1[X] = splitNode1->vX;
+    vel1[Y] = splitNode1->vY;
+    vel1[Z] = splitNode1->vZ;
+
+    vel2[X] = splitNode2->vX;
+    vel2[Y] = splitNode2->vY;
+    vel2[Z] = splitNode2->vZ;
+
+    splitPos1[X] = splitNode1->x;
+    splitPos1[Y] = splitNode1->y;
+    splitPos1[Z] = splitNode1->z;
+
+    splitPos2[X] = splitNode2->x;
+    splitPos2[Y] = splitNode2->y;
+    splitPos2[Z] = splitNode2->z;
+}
+\end{lstlisting}
+
+\paragraph{Meaning.}
+The norm tests prevent division by zero when testing nearly opposite
+velocities.  Degree-three handling also respects enforced glide planes.  A
+binary-junction trial must improve on the current best power and exceed the
+absolute threshold \code{powerTest > 1.0}.  Saving the winning velocities and
+trial positions already existed; the new degree-three behavior is the stricter
+acceptance condition and the later reuse of those saved positions.  The serial
+path already used
+$d_{\mathrm{split}}=2r_{\mathrm{ann}}+10^{-12}$ before this feature; that line
+is supporting context, not a newly introduced serial change.
+
+\subsubsection{Using the evaluated position and preserving the corner}
+
+\paragraph{Code added.}
+
+\begin{lstlisting}[style=cpp]
+if (nbrs == 3) {
+    VECTOR_COPY(pos1, splitPos1);
+    VECTOR_COPY(pos2, splitPos2);
+}
+
+/* SplitNode() executes the accepted final split here. */
+
+if (nbrs == 3) {
+    if (splitNode1->numNbrs == 2) {
+        ADD_CONSTRAINTS(splitNode1->constraint, CORNER_NODE);
+        if (globalOp) {
+            AddOpResetConstraint(home, &splitNode1->myTag,
+                                 splitNode1->constraint);
+        }
+    }
+    if (splitNode2->numNbrs == 2) {
+        ADD_CONSTRAINTS(splitNode2->constraint, CORNER_NODE);
+        if (globalOp) {
+            AddOpResetConstraint(home, &splitNode2->myTag,
+                                 splitNode2->constraint);
+        }
+    }
+}
+\end{lstlisting}
+
+\paragraph{Meaning.}
+The final degree-three split reuses the positions that actually passed the
+trial mobility/power test instead of entering the general
+\code{CalcJunctionLen()} path.  After \code{SplitNode()} succeeds, whichever
+output node has degree two receives \code{CORNER_NODE}.  A global operation
+then appends the full constraint reset after the create/connectivity records.
+
+\section{Parallel candidate and force evaluation}
+
+\subsection{\texttt{src/SMNSupport.cc}}
+
+\paragraph{Code added: shared parallel eligibility predicate.}
+
+\begin{lstlisting}[style=cpp]
+static int IsSplittableMultiNode(Home_t *home, Node_t *node)
+{
+        int   binaryJunc, planarJunc;
+        real8 tjunc[3];
+
+        if (node->numNbrs < 3) {
+            return(0);
+        }
+
+        if (node->numNbrs > 3) {
+            return(1);
+        }
+
+        if (HAS_ANY_OF_CONSTRAINTS(node->constraint,
+                                   SURFACE_NODE | PINNED_NODE)) {
+            return(0);
+        }
+
+        if ((!home->param->split3node) ||
+            (home->param->materialType != MAT_TYPE_BCC)) {
+            return(0);
+        }
+
+        binaryJunc = BCC_binary_junction_node(home, node, tjunc,
+                                               &planarJunc);
+
+        return((binaryJunc >= 0) && !planarJunc);
+}
+\end{lstlisting}
+
+\paragraph{Code changed: degree-three enumeration and lists.}
+
+\begin{lstlisting}[style=cpp]
+maxSets = POSSIBLE_SPLITS[numNbrs];
+maxSplitCnt = numNbrs >> 1;
+
+if (numNbrs == 3) {
+    maxSplitCnt = 2;
+}
+
+/* BuildRecvDomList(): */
+if (lmnInfo[i].multiNode->numNbrs < 3) {
+    continue;
+}
+
+/* Applied in both local and ghost list builders: */
+if (HAS_ANY_OF_CONSTRAINTS(node->constraint, CORNER_NODE) &&
+    (node->numNbrs != 2)) {
+    REMOVE_CONSTRAINTS(node->constraint, CORNER_NODE);
+}
+
+if (!IsSplittableMultiNode(home, node)) {
+    continue;
+}
+\end{lstlisting}
+
+\paragraph{Meaning.}
+Native and ghost lists now agree on the exact degree-three eligibility rules.
+\code{SMNGetArmSets()} is allowed to select two arms from a three-arm node;
+the existing \code{POSSIBLE_SPLITS[3] == 3} table entry supplies the three
+combinations.  Receive-domain construction also admits degree three, and both
+list builders clear stale corner state before applying the predicate.  The
+unchanged \path{src/SplitMultiNodesParallel.cc} then orchestrates these lists,
+partial-force communication, and final owning-domain evaluation.
+
+\subsection{\texttt{src/SMNEvalSplitForces.cc}}
+
+This stage evaluates local force contributions for native and ghost
+candidates before point-to-point force exchange and accumulation on the
+owning domain.
+
+\paragraph{Code changed: distance, classification, and arm selection.}
+
+\begin{lstlisting}[style=cpp]
+eps = 1.0e-12;
+splitDist = param->rann * 2.0 + eps;
+
+int binaryJunc = -1;
+
+if (numNbrs == 3) {
+    int   planarJunc;
+    real8 tjunc[3];
+
+    binaryJunc = BCC_binary_junction_node(home, node, tjunc,
+                                           &planarJunc);
+    if (planarJunc) binaryJunc = -1;
+}
+
+armList = (int *)calloc(1, (numNbrs - 1) * sizeof(int));
+
+for (setID = 0; setID < totalSets; setID++) {
+    int tmpRepositionNode1 = 0, tmpRepositionNode2 = 0;
+
+    if ((numNbrs == 3) &&
+        ((binaryJunc < 0) ||
+         (armSets[setID][binaryJunc] != 0))) {
+        continue;
+    }
+
+    /* Existing partial-force trial follows. */
+}
+\end{lstlisting}
+
+\paragraph{Code changed: mobility status and degree-two velocity.}
+
+\begin{lstlisting}[style=cpp]
+mobStatus  = EvaluateMobility(home, splitNode1, &mobArgs1);
+mobStatus |= EvaluateMobility(home, splitNode2, &mobArgs2);
+
+AdjustJuncNodeForceAndVel(home, splitNode1, &mobArgs1);
+AdjustJuncNodeForceAndVel(home, splitNode2, &mobArgs2);
+
+if (numNbrs == 3) {
+    Node_t *twoNode =
+        (splitNode1->numNbrs == 2) ? splitNode1 :
+        ((splitNode2->numNbrs == 2) ? splitNode2 :
+         (Node_t *)NULL);
+
+    if (twoNode != (Node_t *)NULL) {
+        twoNode->vX = 0.0;
+        twoNode->vY = 0.0;
+        twoNode->vZ = 0.0;
+    }
+}
+
+if (((numNbrs != 3) || !param->enforceGlidePlanes) &&
+    (vd1 > eps) && (vd2 > eps) &&
+    (fabs(vel1Dotvel2/vd1Sqrt/vd2Sqrt+1.0) < 0.01)) {
+    /* Existing equal-and-opposite velocity handling. */
+}
+\end{lstlisting}
+
+\paragraph{Meaning.}
+The positive epsilon places the trial connector just beyond the immediate
+corner-remesh threshold.  Reclassification protects against stale list data,
+and only the arm set excluding the junction arm is evaluated.  Work storage
+fits two selected arms and reposition flags start deterministically at zero.
+Using \code{|=} retains an error from either mobility call.  Both trial nodes
+are adjusted, the degree-two node is stationary, and velocity normalization
+cannot divide by a zero norm.
+
+\subsection{\texttt{src/SMNEvalMultiNodeSplits.cc}}
+
+This owning-domain stage receives the complete forces, repeats the mobility
+and power test, and executes the accepted topology change.
+
+\paragraph{Code changed: candidate parity with the force stage.}
+
+\begin{lstlisting}[style=cpp]
+eps       = 1.0e-12;
+vNoise    = param->splitMultiNodeAlpha * param->rTol / param->deltaTT;
+splitDist = param->rann * 2.0 + eps;
+
+int binaryJunc = -1;
+
+if (numNbrs == 3) {
+    int   planarJunc;
+    real8 tjunc[3];
+
+    binaryJunc = BCC_binary_junction_node(home, node, tjunc,
+                                           &planarJunc);
+    if (planarJunc) binaryJunc = -1;
+}
+
+armList  = (int *)calloc(1, (numNbrs - 1) * sizeof(int));
+armList2 = (int *)calloc(1, (numNbrs - 1) * sizeof(int));
+
+for (setID = 0; setID < totalSets; setID++) {
+    int tmpRepositionNode1 = 0, tmpRepositionNode2 = 0;
+
+    if ((numNbrs == 3) &&
+        ((binaryJunc < 0) ||
+         (armSets[setID][binaryJunc] != 0))) {
+        continue;
+    }
+
+    /* Existing final trial evaluation follows. */
+}
+\end{lstlisting}
+
+\paragraph{Code added: degree-two boundary condition.}
+
+\begin{lstlisting}[style=cpp]
+AdjustJuncNodeForceAndVel(home, splitNode1, &mobArgs1);
+AdjustJuncNodeForceAndVel(home, splitNode2, &mobArgs2);
+
+if (numNbrs == 3) {
+    Node_t *twoNode =
+        (splitNode1->numNbrs == 2) ? splitNode1 :
+        ((splitNode2->numNbrs == 2) ? splitNode2 :
+         (Node_t *)NULL);
+
+    if (twoNode != (Node_t *)NULL) {
+        twoNode->vX = 0.0;
+        twoNode->vY = 0.0;
+        twoNode->vZ = 0.0;
+    }
+}
+\end{lstlisting}
+
+This block occurs after both the coincident trial mobility and the
+repositioned trial mobility.
+
+\paragraph{Code changed: direction guard, power, final positions, and
+constraint.}
+
+\begin{lstlisting}[style=cpp]
+if (((numNbrs != 3) || !param->enforceGlidePlanes) &&
+    (vd1 > eps) && (vd2 > eps) &&
+    (fabs(vel1Dotvel2/vd1Sqrt/vd2Sqrt+1.0) < 0.01)) {
+    /* Existing equal-and-opposite velocity handling. */
+}
+
+if (((powerTest - powerMax) > eps) &&
+    ((numNbrs != 3) || (powerTest > 1.0))) {
+    /* Save winning velocities and splitPos1/splitPos2. */
+}
+
+if (numNbrs == 3) {
+    VECTOR_COPY(pos1, splitPos1);
+    VECTOR_COPY(pos2, splitPos2);
+}
+
+/* SplitNode() executes the accepted final split here. */
+
+if (numNbrs == 3) {
+    if (splitNode1->numNbrs == 2) {
+        ADD_CONSTRAINTS(splitNode1->constraint, CORNER_NODE);
+        if (globalOp) {
+            AddOpResetConstraint(home, &splitNode1->myTag,
+                                 splitNode1->constraint);
+        }
+    }
+    if (splitNode2->numNbrs == 2) {
+        ADD_CONSTRAINTS(splitNode2->constraint, CORNER_NODE);
+        if (globalOp) {
+            AddOpResetConstraint(home, &splitNode2->myTag,
+                                 splitNode2->constraint);
+        }
+    }
+}
+\end{lstlisting}
+
+\paragraph{Meaning.}
+The owning-domain decision mirrors the serial decision: the degree-two trial
+is stationary, power must both improve and exceed one, and the final split
+uses the tested positions.  As in the serial function, storing the winning
+positions was pre-existing; the new code applies the absolute degree-three
+threshold and explicitly copies those positions into the final degree-three
+split.  Successful corner marking is immediately followed by a remote
+constraint operation, so serial and parallel topology selectors produce the
+same persistent topology state.
+
+\section{Remesh preservation and MPI propagation}
+
+\subsection{\texttt{src/Remesh.cc}}
+
+Both remesh rules reach the shared \code{MeshCoarsen()} implementation, so the
+corner rule is implemented once in its candidate and execution phases.
+
+\paragraph{Code added: candidate-phase guard.}
+
+\begin{lstlisting}[style=cpp]
+if ((HAS_ANY_OF_CONSTRAINTS(node->constraint, CORNER_NODE) ||
+     HAS_ANY_OF_CONSTRAINTS(nbr1->constraint, CORNER_NODE)) &&
+    (r1 > (2.0 * param->rann)) &&
+    (HAS_ANY_OF_CONSTRAINTS(node->constraint, CORNER_NODE) ||
+     HAS_ANY_OF_CONSTRAINTS(nbr2->constraint, CORNER_NODE)) &&
+    (r2 > (2.0 * param->rann))) {
+    continue;
+}
+\end{lstlisting}
+
+\paragraph{Code added: independent execution-phase gates.}
+
+\begin{lstlisting}[style=cpp]
+mergeNbr1Allowed = 1;
+mergeNbr2Allowed = 1;
+
+if (HAS_ANY_OF_CONSTRAINTS(node->constraint, CORNER_NODE) ||
+    HAS_ANY_OF_CONSTRAINTS(nbr1->constraint, CORNER_NODE)) {
+    real8 dx1, dy1, dz1;
+    real8 cornerMergeDist2;
+
+    dx1 = nbr1->x - node->x;
+    dy1 = nbr1->y - node->y;
+    dz1 = nbr1->z - node->z;
+
+    ZImage(param, &dx1, &dy1, &dz1);
+    cornerMergeDist2 = 4.0 * param->rann * param->rann;
+
+    mergeNbr1Allowed = ((dx1*dx1 + dy1*dy1 + dz1*dz1) <=
+                        cornerMergeDist2);
+}
+
+if (HAS_ANY_OF_CONSTRAINTS(node->constraint, CORNER_NODE) ||
+    HAS_ANY_OF_CONSTRAINTS(nbr2->constraint, CORNER_NODE)) {
+    real8 dx2, dy2, dz2;
+    real8 cornerMergeDist2;
+
+    dx2 = nbr2->x - node->x;
+    dy2 = nbr2->y - node->y;
+    dz2 = nbr2->z - node->z;
+
+    ZImage(param, &dx2, &dy2, &dz2);
+    cornerMergeDist2 = 4.0 * param->rann * param->rann;
+
+    mergeNbr2Allowed = ((dx2*dx2 + dy2*dy2 + dz2*dz2) <=
+                        cornerMergeDist2);
+}
+
+if ((!mergeNbr1Allowed) && (!mergeNbr2Allowed)) {
+    continue;
+}
+
+if (mergeNbr1Allowed &&
+    ((nbr1->flags & NO_MESH_COARSEN) == 0)) {
+    /* Existing MergeNode() attempt for nbr1. */
+}
+
+if (mergeDone == 0) {
+    if (mergeNbr2Allowed &&
+        ((nbr2->flags & NO_MESH_COARSEN) == 0)) {
+        /* Existing MergeNode() attempt for nbr2. */
+    }
+}
+\end{lstlisting}
+
+\paragraph{Meaning.}
+An edge touching a corner may be merged only if its minimum-image length is
+$L\leq2r_{\mathrm{ann}}$.  The candidate guard skips a degree-two coarsen
+candidate when both relevant corner edges are long, but retains an escape for
+pathologically short segments.  At execution, each neighbor is gated
+independently.  This prevents arbitrary arm ordering from collapsing a long
+protected edge merely because the other edge is short.
+
+\subsection{\texttt{src/RemoteOps.cc}}
+
+\paragraph{Code added.}
+
+\begin{lstlisting}[style=cpp]
+void AddOpResetConstraint(Home_t *home, Tag_t *tag1, int constraint)
+{
+#ifdef _OPENMP
+#pragma omp critical (CRIT_ADD_OP)
+#endif
+    {
+        int                    opDataLen = sizeof(RemOpResetConstraint_t);
+        int                    neededLen = home->opListUsedLen + opDataLen;
+        RemOpResetConstraint_t opData;
+
+        if (home->opListAllocLen < neededLen) {
+            ExtendOpList(home);
+        }
+
+        opData.opType = REM_OP_RESET_CONSTRAINT;
+        opData.tag1.domainID = tag1->domainID;
+        opData.tag1.index    = tag1->index;
+        opData.constraint    = constraint;
+
+        memcpy(&home->opListBuf[home->opListUsedLen], &opData, opDataLen);
+        home->opListUsedLen += opDataLen;
+    }
+
+    return;
+}
+\end{lstlisting}
+
+\paragraph{Meaning.}
+The emitter grows the operation buffer when necessary, packs the complete
+constraint value, and appends the fixed-size record.  The same OpenMP critical
+section used by other operation emitters prevents concurrent writers from
+overlapping records.
+
+\subsection{\texttt{src/FixRemesh.cc}}
+
+\paragraph{Code added.}
+
+\begin{lstlisting}[style=cpp]
+} else if (opType == REM_OP_RESET_CONSTRAINT) {
+    int                    opLen = sizeof(RemOpResetConstraint_t);
+    RemOpResetConstraint_t opBuf;
+
+    memcpy(&opBuf, &recvOpListBuf[offSet], opLen);
+    offSet += opLen;
+
+    node1 = GetNodeFromTag(home, opBuf.tag1);
+
+    if (node1 != (Node_t *)NULL) {
+        SET_CONSTRAINTS(node1->constraint, opBuf.constraint);
+    }
+\end{lstlisting}
+
+\paragraph{Meaning.}
+The receiver consumes exactly one matching wire record, resolves the target
+tag, and replaces the complete constraint mask.  Ordering is essential:
+\code{SplitNode()} emits create/connectivity operations first, then the caller
+appends the reset.  Replay therefore creates the remote ghost before setting
+\code{CORNER_NODE}, and it does so before immediate remeshing.
+
+\section{Regression fixture}
+
+\subsection{\texttt{tests/bcc\_binary\_junction\_node.ctrl}}
+
+The control fixture is shown in full because it is both executable input and
+the run guide.
+
+\paragraph{File added.}
+
+\begin{lstlisting}[style=data]
+#
+# One-step regression fixture for splitting a non-planar BCC binary-junction
+# node.  Run from the tests directory with:
+#
+#   ../bin/paradis -d bcc_binary_junction_node.data \
+#       bcc_binary_junction_node.ctrl
+#
+# The final restart must contain five nodes.  The original three-arm node is
+# split into a three-arm node and a degree-two node carrying constraint 16
+# (CORNER_NODE).  Set useParallelSplitMultiNode to 1 to exercise the parallel
+# split implementation; 0 exercises the serial implementation.
+# A two-rank communication check can then be run with:
+#
+#   mpirun -n 2 ../bin/paradis -doms 2 1 1 \
+#       -d bcc_binary_junction_node.data bcc_binary_junction_node.ctrl
+#
+dirname = "bcc_binary_junction_node_results"
+
+numXdoms = 1
+numYdoms = 1
+numZdoms = 1
+
+numXcells = 4
+numYcells = 4
+numZcells = 4
+
+fmEnabled       = 1
+fmMPOrder       = 2
+fmTaylorOrder   = 5
+fmCorrectionTbl = "../inputs/fm-ctab.Ta.600K.0GPa.m2.t5.dat"
+
+maxstep = 1
+remeshRule = 2
+minSeg = 2.000000e+02
+maxSeg = 2.500000e+03
+rann = 2.000000e+00
+rTol = 1.000000e+00
+timestepIntegrator = "trapezoid"
+
+rc = 5.000000e+00
+MobScrew = 1.000000e+01
+MobEdge = 1.000000e+01
+MobClimb = 1.000000e-08
+mobilityLaw = "BCC_0"
+
+split3node = 1
+splitMultiNodeFreq = 1
+useParallelSplitMultiNode = 0
+
+loadType = 0
+edotdir = [
+  0.0
+  0.0
+  1.0
+]
+appliedStress = [
+  0.000000e+00
+  0.000000e+00
+  5.000000e+08
+  0.000000e+00
+  0.000000e+00
+  0.000000e+00
+]
+
+savetimers = 0
+savecn = 1
+savecnfreq = 1
+savecncounter = 0
+gnuplot = 0
+povray = 0
+saveprop = 0
+\end{lstlisting}
+
+\paragraph{Meaning.}
+The fixture runs exactly one BCC step with a $zz$ stress of $5\times10^8$,
+evaluates multi-node splitting every cycle, and writes a restart.  It defaults
+to \code{useParallelSplitMultiNode = 0}, the serial topology implementation.
+Set the selector to one in a \code{PARALLEL} build to exercise the distributed
+force path.  The two-rank command overrides the domain layout to $2\times1
+\times1$, testing ownership and remote constraint replay.
+
+\subsection{\texttt{tests/bcc\_binary\_junction\_node.data}}
+
+\paragraph{File added.}
+
+\begin{lstlisting}[style=data]
+dataFileVersion = 5
+numFileSegments = 1
+minCoordinates = [
+  -1.750000e+04
+  -1.750000e+04
+  -1.750000e+04
+]
+maxCoordinates = [
+   1.750000e+04
+   1.750000e+04
+   1.750000e+04
+]
+nodeCount = 4
+dataDecompType = 2
+dataDecompGeometry = [
+  1
+  1
+  1
+]
+
+domainDecomposition =
+# Dom_ID  Minimum XYZ bounds                    Maximum XYZ bounds
+  0      -17500.0 -17500.0 -17500.0            17500.0 17500.0 17500.0
+
+nodalData =
+# A non-planar BCC binary junction: the <100> junction arm balances the two
+# 1/2<111> glide arms.  The three fixed end nodes isolate the topology
+# operation from endpoint motion.
+ 0,0 0.0 0.0 0.0 3 0
+   0,1 -1.1547005383792517  0.0                 0.0
+         0.0                 1.0                 0.0
+   0,2  0.5773502691896258  0.5773502691896258  0.5773502691896258
+        -0.7071067811865475  0.0                 0.7071067811865475
+   0,3  0.5773502691896258 -0.5773502691896258 -0.5773502691896258
+        -0.7071067811865475 -0.7071067811865475  0.0
+
+ 0,1 2000.0 0.0 0.0 1 7
+   0,0  1.1547005383792517  0.0                 0.0
+         0.0                 1.0                 0.0
+
+ 0,2 0.0 2000.0 0.0 1 7
+   0,0 -0.5773502691896258 -0.5773502691896258 -0.5773502691896258
+        -0.7071067811865475  0.0                 0.7071067811865475
+
+ 0,3 0.0 0.0 2000.0 1 7
+   0,0 -0.5773502691896258  0.5773502691896258  0.5773502691896258
+        -0.7071067811865475 -0.7071067811865475  0.0
+\end{lstlisting}
+
+\paragraph{Meaning.}
+Node \code{0,0} is the unconstrained degree-three candidate at the origin.
+The arm toward node \code{0,1} has a $\langle100\rangle$ Burgers-vector
+magnitude of approximately 1.1547 and is recognized as the junction arm.  The
+two unit-magnitude $\tfrac12\langle111\rangle$ arms balance it and form a
+non-planar geometry under the five-degree test.  Nodes \code{0,1},
+\code{0,2}, and \code{0,3} are 2000 units away and carry constraint 7
+(fully pinned), isolating the topology event from endpoint motion.
+
+\subsection{Commands and expected result}
+
+Run from \path{tests}:
+
+\begin{lstlisting}[style=data]
+../bin/paradis -d bcc_binary_junction_node.data \
+    bcc_binary_junction_node.ctrl
+\end{lstlisting}
+
+For the parallel topology selector, change
+\code{useParallelSplitMultiNode = 1}.  For a two-rank ownership test, run:
+
+\begin{lstlisting}[style=data]
+mpirun -n 2 ../bin/paradis -doms 2 1 1 \
+    -d bcc_binary_junction_node.data \
+    bcc_binary_junction_node.ctrl
+\end{lstlisting}
+
+After one step,
+\path{bcc_binary_junction_node_results/restart/restart.data} must contain five
+nodes:
+
+\begin{itemize}
+  \item the three original pinned degree-one endpoints;
+  \item exactly one degree-two node with constraint 16
+        (\code{CORNER_NODE}); and
+  \item one degree-three node without the corner constraint.
+\end{itemize}
+
+The regression review completed serial and \code{PARALLEL} builds, obtained
+byte-identical one-rank restart data from selectors zero and one, completed
+two-rank MPI runs with both selectors, and observed the expected unique
+degree-two constraint-16 node.
+
+\section{End-to-end meaning of the change}
+
+The code fragments above form one ordered topology transaction:
+
+\begin{enumerate}
+  \item Parameter plumbing enables degree-three BCC candidates.
+  \item The shared classifier identifies exactly one large-magnitude junction
+        arm and rejects planar parent geometry.
+  \item Serial or parallel arm enumeration moves only the two non-junction
+        arms in the trial split.
+  \item Mobility evaluation holds the degree-two trial node fixed, checks the
+        separation direction, and accepts only a sufficiently positive power
+        gain.
+  \item The final split reuses the tested positions and marks the degree-two
+        result as a corner.
+  \item The append-only remote operation copies the full constraint state to
+        ghost nodes before remeshing.
+  \item Corner-aware coarsening preserves long physical edges while retaining
+        a controlled escape for very short pathological segments.
+\end{enumerate}
+
+The change deliberately does not generalize all degree-three splitting.  It
+is limited to BCC, exactly three valid arms, exactly one junction arm under the
+Burgers-magnitude rule, non-planar geometry, and nodes that are neither pinned
+nor surface-constrained.  Nodes with four or more arms retain their established
+multi-node split behavior.
+
+\end{document}
