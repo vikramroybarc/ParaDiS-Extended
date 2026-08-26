@@ -23,7 +23,8 @@ typedef enum {
         REM_OP_RESET_SEG_FORCE1,
         REM_OP_RESET_SEG_FORCE2,
         REM_OP_MARK_FORCE_OBSOLETE,
-        REM_OP_RESET_PLANE
+        REM_OP_RESET_PLANE,
+        REM_OP_RESET_CONSTRAINT
 } OpType_t;
 
 typedef struct {
@@ -71,6 +72,12 @@ typedef struct {
 typedef struct {
     int   opType;
     Tag_t tag1;
+    int   constraint;
+} RemOpResetConstraint_t;
+
+typedef struct {
+    int   opType;
+    Tag_t tag1;
     Tag_t tag2;
     real8 f1[3];
 } RemOpResetSegForce1_t;
@@ -106,6 +113,7 @@ void AddOpInsertArm(Home_t *home, Tag_t *tag1, Tag_t *tag2, real8 newBurg[3],
         real8 newPlane[3]);
 void AddOpMarkForceObsolete(Home_t *home, Tag_t *tag1);
 void AddOpRemoveNode(Home_t *home, Tag_t *tag1);
+void AddOpResetConstraint(Home_t *home, Tag_t *tag1, int constraint);
 void AddOpResetCoord(Home_t *home, Tag_t *tag1, real8 newCoord[3]);
 void AddOpResetPlane(Home_t *home, Tag_t *tag1, Tag_t *tag2,
         real8 newplane[3]);

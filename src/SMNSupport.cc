@@ -49,6 +49,11 @@ static int IsSplittableMultiNode(Home_t *home, Node_t *node)
             return(1);
         }
 
+        if (HAS_ANY_OF_CONSTRAINTS(node->constraint,
+                                   SURFACE_NODE | PINNED_NODE)) {
+            return(0);
+        }
+
         if ((!home->param->split3node) ||
             (home->param->materialType != MAT_TYPE_BCC)) {
             return(0);

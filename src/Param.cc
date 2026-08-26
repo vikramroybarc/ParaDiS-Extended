@@ -195,7 +195,7 @@ void CtrlParamInit(Param_t *param, ParamList_t *CPList)
     BindVar(CPList, "remeshRule"               , &param->remeshRule               , V_INT, 1, VFLAG_NULL); param->remeshRule          =  2;
     BindVar(CPList, "splitMultiNodeFreq"       , &param->splitMultiNodeFreq       , V_INT, 1, VFLAG_NULL); param->splitMultiNodeFreq  =  1;
     BindVar(CPList, "splitMultiNodeAlpha"      , &param->splitMultiNodeAlpha      , V_DBL, 1, VFLAG_NULL); param->splitMultiNodeAlpha =  1.0e-3;
-    BindVar(CPList, "split3node"               , &param->split3node               , V_INT, 1, VFLAG_NULL); param->split3node          =  1;
+    BindVar(CPList, "split3node"                , &param->split3node                , V_INT, 1, VFLAG_NULL); param->split3node          =  1;
     BindVar(CPList, "useParallelSplitMultiNode", &param->useParallelSplitMultiNode, V_INT, 1, VFLAG_NULL);
     BindVar(CPList, "useUniformJunctionLen"    , &param->useUniformJunctionLen    , V_INT, 1, VFLAG_NULL);
     BindVar(CPList, "collisionMethod"          , &param->collisionMethod          , V_INT, 1, VFLAG_NULL); param->collisionMethod     =  2;
@@ -860,7 +860,7 @@ void Print_Param (Param_t *p, const char *msg)
    printf("   remeshAreaMin                        : %+lf\n"     , p->remeshAreaMin );
    printf("   splitMultiNodeFreq                   : %d\n"       , p->splitMultiNodeFreq );
    printf("   splitMultiNodeAlpha                  : %+lf\n"     , p->splitMultiNodeAlpha );
-   printf("   split3node                          : %d\n\n"     , p->split3node );
+   printf("   split3node                           : %d\n\n"     , p->split3node );
 
    printf("   useParallelSplitMultiNode            : %d\n\n"     , p->useParallelSplitMultiNode );
 

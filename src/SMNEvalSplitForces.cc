@@ -64,8 +64,8 @@ void SMNEvalSplitForces(Home_t *home, int nodeCount, SMN_Info_t *nodeInfo)
 #endif
         param     = home->param;
 
-        splitDist = param->rann * 2.0;
         eps = 1.0e-12;
+        splitDist = param->rann * 2.0 + eps;
 
 /*
  *      Loop through all native multinodes

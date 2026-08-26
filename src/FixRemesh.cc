@@ -230,6 +230,22 @@ void FixRemesh(Home_t *home)
                     node1->z = opBuf.newCoord[2];
                 }
 
+            } else if (opType == REM_OP_RESET_CONSTRAINT) {
+                int                    opLen = sizeof(RemOpResetConstraint_t);
+                RemOpResetConstraint_t opBuf;
+
+/*
+ *              Reset the constraints of the specified node.
+ */
+                memcpy(&opBuf, &recvOpListBuf[offSet], opLen);
+                offSet += opLen;
+
+                node1 = GetNodeFromTag(home, opBuf.tag1);
+
+                if (node1 != (Node_t *)NULL) {
+                    SET_CONSTRAINTS(node1->constraint, opBuf.constraint);
+                }
+
             } else if (opType == REM_OP_REMOVE_NODE) {
                 int               opLen = sizeof(RemOpRemoveNode_t);
                 RemOpRemoveNode_t opBuf;

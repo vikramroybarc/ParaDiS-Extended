@@ -2254,9 +2254,17 @@ void SplitMultiNodes(Home_t *home)
                     if (nbrs == 3) {
                         if (splitNode1->numNbrs == 2) {
                             ADD_CONSTRAINTS(splitNode1->constraint, CORNER_NODE);
+                            if (globalOp) {
+                                AddOpResetConstraint(home, &splitNode1->myTag,
+                                                     splitNode1->constraint);
+                            }
                         }
                         if (splitNode2->numNbrs == 2) {
                             ADD_CONSTRAINTS(splitNode2->constraint, CORNER_NODE);
+                            if (globalOp) {
+                                AddOpResetConstraint(home, &splitNode2->myTag,
+                                                     splitNode2->constraint);
+                            }
                         }
                     }
 

@@ -73,15 +73,15 @@ void SMNEvalMultiNodeSplits(Home_t *home, int nodeCount, SMN_Info_t *nodeInfo)
 #endif
         param     = home->param;
 
+        eps       = 1.0e-12;
         vNoise    = param->splitMultiNodeAlpha * param->rTol / param->deltaTT;
-        splitDist = param->rann * 2.0;
+        splitDist = param->rann * 2.0 + eps;
 
         armList  = (int *)NULL;
         armList2 = (int *)NULL;
         SegForces  = (SegForce_t *)NULL;
 
         globalOp = 1;
-        eps      = 1.0e-12;
 
 /*
  *      Allocate a temporary array in which to store segment forces while
@@ -905,9 +905,17 @@ void SMNEvalMultiNodeSplits(Home_t *home, int nodeCount, SMN_Info_t *nodeInfo)
                if (numNbrs == 3) {
                    if (splitNode1->numNbrs == 2) {
                        ADD_CONSTRAINTS(splitNode1->constraint, CORNER_NODE);
+                       if (globalOp) {
+                           AddOpResetConstraint(home, &splitNode1->myTag,
+                                                splitNode1->constraint);
+                       }
                    }
                    if (splitNode2->numNbrs == 2) {
                        ADD_CONSTRAINTS(splitNode2->constraint, CORNER_NODE);
+                       if (globalOp) {
+                           AddOpResetConstraint(home, &splitNode2->myTag,
+                                                splitNode2->constraint);
+                       }
                    }
                }
 

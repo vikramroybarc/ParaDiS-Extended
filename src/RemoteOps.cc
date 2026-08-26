@@ -17,6 +17,7 @@
  *      AddOpInsertArm()
  *      AddOpMarkForceObsolete()
  *      AddOpRemoveNode()
+ *      AddOpResetConstraint()
  *      AddOpResetCoord()
  *      AddOpResetPlane()
  *      AddOpResetSegForce1()
@@ -426,6 +427,48 @@ void AddOpResetCoord(Home_t *home, Tag_t *tag1, real8 newCoord[3])
         for (int i = 0; i < 3; ++i) {
             opData.newCoord[i]  = newCoord[i];
         }
+
+        memcpy(&home->opListBuf[home->opListUsedLen], &opData, opDataLen);
+
+        home->opListUsedLen += opDataLen;
+
+    }  // end omp critical section
+
+    return;
+}
+
+
+/*-------------------------------------------------------------------------
+ *
+ *  Function:     AddOpResetConstraint
+ *  Description:  Add a locally performed 'RESET_CONSTRAINT' operation to
+ *                the list to be sent to remote domains.  This operation
+ *                replaces the constraints associated with <tag1>.
+ *
+ *------------------------------------------------------------------------*/
+void AddOpResetConstraint(Home_t *home, Tag_t *tag1, int constraint)
+{
+/*
+ *  For threaded simulations, we must insure only 1 thread
+ *  updates the Op list at a time.
+ */
+#ifdef _OPENMP
+#pragma omp critical (CRIT_ADD_OP)
+#endif
+    {
+        int                    opDataLen = sizeof(RemOpResetConstraint_t);
+        int                    neededLen = home->opListUsedLen + opDataLen;
+        RemOpResetConstraint_t opData;
+
+        if (home->opListAllocLen < neededLen) {
+            ExtendOpList(home);
+        }
+
+        opData.opType = REM_OP_RESET_CONSTRAINT;
+
+        opData.tag1.domainID = tag1->domainID;
+        opData.tag1.index    = tag1->index;
+        opData.constraint    = constraint;
 
         memcpy(&home->opListBuf[home->opListUsedLen], &opData, opDataLen);
 

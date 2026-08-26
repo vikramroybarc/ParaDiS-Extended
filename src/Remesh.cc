@@ -533,8 +533,12 @@ void MeshCoarsen(Home_t *home)
  *              an attached segment is very short so pathological segments
  *              can still be removed.
  */
-                if (HAS_ANY_OF_CONSTRAINTS(node->constraint, CORNER_NODE) &&
-                    (MIN(r1, r2) > (2.0 * param->rann))) {
+                if ((HAS_ANY_OF_CONSTRAINTS(node->constraint, CORNER_NODE) ||
+                     HAS_ANY_OF_CONSTRAINTS(nbr1->constraint, CORNER_NODE)) &&
+                    (r1 > (2.0 * param->rann)) &&
+                    (HAS_ANY_OF_CONSTRAINTS(node->constraint, CORNER_NODE) ||
+                     HAS_ANY_OF_CONSTRAINTS(nbr2->constraint, CORNER_NODE)) &&
+                    (r2 > (2.0 * param->rann))) {
                     continue;
                 }
 
@@ -767,6 +771,7 @@ void MeshCoarsen(Home_t *home)
         for (int i=0; i < coarsenListEnts; i++) 
         {
             int    q, proceed;
+            int    mergeNbr1Allowed, mergeNbr2Allowed;
             int    mergeDone, mergeStatus, globalOp;
             real8  newPos[3], f0seg1[3], f1seg1[3];
             Tag_t  nbr1Tag, nbr2Tag;
@@ -832,6 +837,52 @@ void MeshCoarsen(Home_t *home)
                 continue;
             }
 
+/*
+ *          OpenDiS permits a corner node to merge only across a segment no
+ *          longer than twice the annihilation distance.  The coarsen list
+ *          contains both neighbors, so gate each merge independently; an
+ *          arbitrary arm ordering must not collapse the longer segment.
+ */
+            mergeNbr1Allowed = 1;
+            mergeNbr2Allowed = 1;
+
+            if (HAS_ANY_OF_CONSTRAINTS(node->constraint, CORNER_NODE) ||
+                HAS_ANY_OF_CONSTRAINTS(nbr1->constraint, CORNER_NODE)) {
+                real8 dx1, dy1, dz1;
+                real8 cornerMergeDist2;
+
+                dx1 = nbr1->x - node->x;
+                dy1 = nbr1->y - node->y;
+                dz1 = nbr1->z - node->z;
+
+                ZImage(param, &dx1, &dy1, &dz1);
+
+                cornerMergeDist2 = 4.0 * param->rann * param->rann;
+
+                mergeNbr1Allowed = ((dx1*dx1 + dy1*dy1 + dz1*dz1) <=
+                                    cornerMergeDist2);
+            }
+
+            if (HAS_ANY_OF_CONSTRAINTS(node->constraint, CORNER_NODE) ||
+                HAS_ANY_OF_CONSTRAINTS(nbr2->constraint, CORNER_NODE)) {
+                real8 dx2, dy2, dz2;
+                real8 cornerMergeDist2;
+
+                dx2 = nbr2->x - node->x;
+                dy2 = nbr2->y - node->y;
+                dz2 = nbr2->z - node->z;
+
+                ZImage(param, &dx2, &dy2, &dz2);
+
+                cornerMergeDist2 = 4.0 * param->rann * param->rann;
+
+                mergeNbr2Allowed = ((dx2*dx2 + dy2*dy2 + dz2*dz2) <=
+                                    cornerMergeDist2);
+            }
+
+            if ((!mergeNbr1Allowed) && (!mergeNbr2Allowed)) {
+                continue;
+            }
 
             EstCoarsenForces(home, nbr1, node, nbr2, f0seg1, f1seg1);
 
@@ -890,7 +941,8 @@ void MeshCoarsen(Home_t *home)
  *              If the first neighbor is not exempt from a coarsen
  *              operation, attempt to merge the nodes.
  */
-                if ((nbr1->flags & NO_MESH_COARSEN) == 0) {
+                if (mergeNbr1Allowed &&
+                    ((nbr1->flags & NO_MESH_COARSEN) == 0)) {
 
                     newPos[X] = nbr1->x;
                     newPos[Y] = nbr1->y;
@@ -911,7 +963,8 @@ void MeshCoarsen(Home_t *home)
  *              the other neighbor.
  */
                 if (mergeDone == 0) {
-                    if ((nbr2->flags & NO_MESH_COARSEN) == 0) {
+                    if (mergeNbr2Allowed &&
+                        ((nbr2->flags & NO_MESH_COARSEN) == 0)) {
                         newPos[X] = nbr2->x;
                         newPos[Y] = nbr2->y;
                         newPos[Z] = nbr2->z;
