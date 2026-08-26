@@ -1,9 +1,10 @@
 /*****************************************************************************
  *
  *      Module:       SMNEvalMultiNodeSplits.c
- *      Description:  This function examines all nodes with at least
- *                    four arms and decides if the node should be split
- *                    and some of the node's arms moved to a new node.
+ *      Description:  This function evaluates nodes with at least four
+ *                    arms and eligible three-arm BCC binary junctions to
+ *                    decide if a node should be split and some of its arms
+ *                    moved to a new node.
  *                    If it is determined this is necessary, the function
  *                    will invoke the lower level SplitNode() function
  *                    providing the list of arms to be moved to the new
@@ -94,6 +95,7 @@ void SMNEvalMultiNodeSplits(Home_t *home, int nodeCount, SMN_Info_t *nodeInfo)
  *      Loop through all native multinodes
  */
         for (listIndex = 0; listIndex < nodeCount; listIndex++) {
+            int    binaryJunc = -1;
             int    k;
             int    origNumNbrs;
             int    segID, setID, setIndex;
@@ -145,6 +147,15 @@ void SMNEvalMultiNodeSplits(Home_t *home, int nodeCount, SMN_Info_t *nodeInfo)
             numNbrs = node->numNbrs;
             origNumNbrs = numNbrs;
 
+            if (numNbrs == 3) {
+                int   planarJunc;
+                real8 tjunc[3];
+
+                binaryJunc = BCC_binary_junction_node(home, node, tjunc,
+                                                       &planarJunc);
+                if (planarJunc) binaryJunc = -1;
+            }
+
             bkupNodeCount = node->numNbrs + 1;
             bkupNodeList = (Node_t *)malloc(bkupNodeCount * sizeof(Node_t));
 
@@ -192,14 +203,20 @@ void SMNEvalMultiNodeSplits(Home_t *home, int nodeCount, SMN_Info_t *nodeInfo)
             origVel[Y] = node->vY;
             origVel[Z] = node->vZ;
 
-            armList = (int *)calloc(1, (numNbrs - 2) * sizeof(int));
-            armList2 = (int *)calloc(1, (numNbrs - 2) * sizeof(int));
+            armList = (int *)calloc(1, (numNbrs - 1) * sizeof(int));
+            armList2 = (int *)calloc(1, (numNbrs - 1) * sizeof(int));
 
             for (setID = 0; setID < totalSets; setID++) {
                 int   tmpSegCount1, tmpSegCount2;
-                int   tmpRepositionNode1, tmpRepositionNode2;
+                int   tmpRepositionNode1 = 0, tmpRepositionNode2 = 0;
                 real8 vDiffx, vDiffy, vDiffz;
                 MobArgs_t mobArgs1, mobArgs2;
+
+                if ((numNbrs == 3) &&
+                    ((binaryJunc < 0) ||
+                     (armSets[setID][binaryJunc] != 0))) {
+                    continue;
+                }
 
 /*
  *              Attempt to split the node.  If the split fails,
@@ -313,12 +330,24 @@ void SMNEvalMultiNodeSplits(Home_t *home, int nodeCount, SMN_Info_t *nodeInfo)
  *                  the force/velocity of the two nodes appropriately.
  */
                     AdjustJuncNodeForceAndVel(home, splitNode1, &mobArgs1);
+                    AdjustJuncNodeForceAndVel(home, splitNode2, &mobArgs2);
+
+                    if (numNbrs == 3) {
+                        Node_t *twoNode =
+                            (splitNode1->numNbrs == 2) ? splitNode1 :
+                            ((splitNode2->numNbrs == 2) ? splitNode2 :
+                             (Node_t *)NULL);
+
+                        if (twoNode != (Node_t *)NULL) {
+                            twoNode->vX = 0.0;
+                            twoNode->vY = 0.0;
+                            twoNode->vZ = 0.0;
+                        }
+                    }
 
                     vd1 = (splitNode1->vX * splitNode1->vX) +
                           (splitNode1->vY * splitNode1->vY) +
                           (splitNode1->vZ * splitNode1->vZ);
-
-                    AdjustJuncNodeForceAndVel(home, splitNode2, &mobArgs2);
 
                     vd2 = (splitNode2->vX * splitNode2->vX) +
                           (splitNode2->vY * splitNode2->vY) +
@@ -342,7 +371,10 @@ void SMNEvalMultiNodeSplits(Home_t *home, int nodeCount, SMN_Info_t *nodeInfo)
                         vd1Sqrt = sqrt(vd1);
                         vd2Sqrt = sqrt(vd2);
 
-                        if (fabs(vel1Dotvel2/vd1Sqrt/vd2Sqrt+1.0) < 0.01) {
+                        if (((numNbrs != 3) || !param->enforceGlidePlanes) &&
+                            (vd1 > eps) && (vd2 > eps) &&
+                            (fabs(vel1Dotvel2/vd1Sqrt/vd2Sqrt+1.0) <
+                             0.01)) {
 /*
  *                          In this case, the velocity of the two nodes
  *                          is nearly equal and opposite, so we'll treat
@@ -517,6 +549,19 @@ void SMNEvalMultiNodeSplits(Home_t *home, int nodeCount, SMN_Info_t *nodeInfo)
                         mobStatus |= EvaluateMobility(home, splitNode2,
                                                       &mobArgs2);
 
+                        if (numNbrs == 3) {
+                            Node_t *twoNode =
+                                (splitNode1->numNbrs == 2) ? splitNode1 :
+                                ((splitNode2->numNbrs == 2) ? splitNode2 :
+                                 (Node_t *)NULL);
+
+                            if (twoNode != (Node_t *)NULL) {
+                                twoNode->vX = 0.0;
+                                twoNode->vY = 0.0;
+                                twoNode->vZ = 0.0;
+                            }
+                        }
+
 #ifdef ESHELBY
                         SegPartListClear(home);
 #endif
@@ -573,7 +618,8 @@ void SMNEvalMultiNodeSplits(Home_t *home, int nodeCount, SMN_Info_t *nodeInfo)
  *                  highest energey release, save enough info to 
  *                  perform this split later.
  */
-                    if ((powerTest - powerMax) > eps) {
+                    if (((powerTest - powerMax) > eps) &&
+                        ((numNbrs != 3) || (powerTest > 1.0))) {
 
                         vel1[X] = splitNode1->vX;
                         vel1[Y] = splitNode1->vY;
@@ -825,6 +871,11 @@ void SMNEvalMultiNodeSplits(Home_t *home, int nodeCount, SMN_Info_t *nodeInfo)
 
                 FoldBox(param, &pos2[X], &pos2[Y], &pos2[Z]);
 
+                if (numNbrs == 3) {
+                    VECTOR_COPY(pos1, splitPos1);
+                    VECTOR_COPY(pos2, splitPos2);
+                }
+
 /*
  *             Note: after the split, the arms selected to be split
  *             will be connected to splitNode2 which will be
@@ -849,6 +900,15 @@ void SMNEvalMultiNodeSplits(Home_t *home, int nodeCount, SMN_Info_t *nodeInfo)
                    free(armSets);
                    free(armList2);
                    continue;
+               }
+
+               if (numNbrs == 3) {
+                   if (splitNode1->numNbrs == 2) {
+                       ADD_CONSTRAINTS(splitNode1->constraint, CORNER_NODE);
+                   }
+                   if (splitNode2->numNbrs == 2) {
+                       ADD_CONSTRAINTS(splitNode2->constraint, CORNER_NODE);
+                   }
                }
 
 #ifdef DEBUG_LOG_MULTI_NODE_SPLITS

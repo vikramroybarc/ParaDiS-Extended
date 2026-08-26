@@ -951,7 +951,8 @@ static void VerifyConstraints(Home_t *home)
             // of all valid constraints, it's a problem.
 
             allValidConstraints = PINNED_X | PINNED_Y | PINNED_Z |
-                                  SURFACE_NODE | MULTI_JUNCTION_NODE |
+                                  SURFACE_NODE | CORNER_NODE |
+                                  MULTI_JUNCTION_NODE |
                                   LOOP_NODE | CROSS_NODE;
 
             if (HAS_ANY_OF_CONSTRAINTS(node->constraint,

@@ -66,6 +66,8 @@ int    NodeTopologyExemptions(Home_t *home, Node_t *node);
 int    RemoveDoubleLinks(Home_t *home, Node_t *node, int globalOp);
 void   RemoveOrphanedNodes(Home_t *home);
 void   SplitMultiNodes(Home_t *home);
+int    BCC_binary_junction_node(Home_t *home, Node_t *node,
+           real8 tjunc[3], int *planarJunc);
 int    SplitNode(Home_t *home, int opClass, Node_t *node, real8 *pos1,
            real8 *pos2, real8 *vel1, real8 *vel2, int armCount,
            int *armList, int globalOp, Node_t **splitNode1,

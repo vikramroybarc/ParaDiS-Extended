@@ -39,6 +39,8 @@
 #define PINNED_Y            0x00000002   /*  2 ONLY PARTIALLY SUPPORTED */
 #define PINNED_Z            0x00000004   /*  4 ONLY PARTIALLY SUPPORTED */
 #define SURFACE_NODE        0x00000008   /*  8 */
+#define CORNER_NODE         0x00000010   /* 16: Preserve a physical corner */
+                                         /*     during mesh coarsening.     */
 
 #define PINNED_NODE         7            /* Special constraint which */
                                          /* represents all of:       */

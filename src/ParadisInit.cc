@@ -142,6 +142,7 @@ static void ParadisInit_Summary
         printf("|   remesh area (max)            : %0.1lf\n"   , p->remeshAreaMax     );
         printf("|   split multinode freq         : %d\n"       , p->splitMultiNodeFreq  );
         printf("|   split multinode alpha        : %0.3lf\n"   , p->splitMultiNodeAlpha );
+        printf("|   split BCC three-arm nodes    : %s\n"       , p->split3node ? "yes" : "no" );
         printf("|\n" );
 
         printf("| FMM control parameters\n" );

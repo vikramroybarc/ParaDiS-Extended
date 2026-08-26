@@ -528,6 +528,17 @@ void MeshCoarsen(Home_t *home)
                 r3 = sqrt(vec3x*vec3x + vec3y*vec3y + vec3z*vec3z);
 
 /*
+ *              Preserve the physical corner created by a three-arm binary
+ *              junction split.  As in OpenDiS, permit coarsening only when
+ *              an attached segment is very short so pathological segments
+ *              can still be removed.
+ */
+                if (HAS_ANY_OF_CONSTRAINTS(node->constraint, CORNER_NODE) &&
+                    (MIN(r1, r2) > (2.0 * param->rann))) {
+                    continue;
+                }
+
+/*
  *              If we are enforcing the use of segment glide planes, we do
  *              not want to coarsen out a node whose arms are on different
  *              glide planes.

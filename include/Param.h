@@ -248,6 +248,9 @@ struct _param {
         real8 splitMultiNodeAlpha;     /* factor used to control the split multi-node */
                                        /* vNoise term */
 
+        int split3node;                /* Toggle BCC binary-junction */
+                                       /* three-arm node splitting. */
+
         int useParallelSplitMultiNode; /*Toggle indicating if the code   */
                                        /* should use the parallel method */
                                        /* of multi-node splitting or not */

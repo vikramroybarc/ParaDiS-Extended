@@ -29,6 +29,7 @@
  *	Included functions:
  *              AllocNodeArrays()
  *              BackupNode()
+ *              BCC_binary_junction_node()
  *              CheckCollisionConditions()
  *              CopyNodeArrays()
  *		CopyNode()
@@ -341,6 +342,11 @@ int InitTopologyExemptions(Home_t *home)
             }
 
             localNode->flags &= ~(NO_COLLISIONS | NO_MESH_COARSEN);
+
+            if (HAS_ANY_OF_CONSTRAINTS(localNode->constraint, CORNER_NODE) &&
+                (localNode->numNbrs != 2)) {
+                REMOVE_CONSTRAINTS(localNode->constraint, CORNER_NODE);
+            }
         }
 
 #ifdef _OPENMP
@@ -351,6 +357,11 @@ int InitTopologyExemptions(Home_t *home)
 
             ghostNode = home->ghostNodeList[i];
             ghostNode->flags &= ~(NO_COLLISIONS | NO_MESH_COARSEN);
+
+            if (HAS_ANY_OF_CONSTRAINTS(ghostNode->constraint, CORNER_NODE) &&
+                (ghostNode->numNbrs != 2)) {
+                REMOVE_CONSTRAINTS(ghostNode->constraint, CORNER_NODE);
+            }
         }
 
         return(0);
@@ -1219,20 +1230,124 @@ void UpdateNodePlasticStrain(Home_t *home, Node_t *node, real8 *oldPos, real8 *n
 
 /*---------------------------------------------------------------------------
  *
+ *      Function:    BCC_binary_junction_node
+ *      Description: Return the arm index of a three-arm BCC binary
+ *                   junction, or -1 if the node is not one.  Also identify
+ *                   whether the junction line lies in the intersection of
+ *                   its parent glide planes.
+ *
+ *-------------------------------------------------------------------------*/
+int BCC_binary_junction_node(Home_t *home, Node_t *node,
+                             real8 tjunc[3], int *planarJunc)
+{
+        int     armID;
+        int     binaryJunc;
+        int     numArmEdge, numArmGlide, numArmJunc;
+        real8   ndir[3][3];
+        real8   eps, angleTol;
+        Param_t *param;
+
+        binaryJunc = -1;
+        numArmEdge = 0;
+        numArmGlide = 0;
+        numArmJunc = 0;
+
+        VECTOR_ZERO(tjunc);
+        *planarJunc = 0;
+
+        if ((node == (Node_t *)NULL) || (node->numNbrs != 3)) {
+            return(-1);
+        }
+
+        param = home->param;
+        eps = 1.0e-12;
+        angleTol = 5.0 * M_PI / 180.0;
+
+        for (armID = 0; armID < node->numNbrs; armID++) {
+            real8  bMag, lineMag2;
+            real8  burg[3], lineDir[3], normal[3];
+            Node_t *nbrNode;
+
+            nbrNode = GetNeighborNode(home, node, armID);
+
+            if (nbrNode == (Node_t *)NULL) {
+                continue;
+            }
+
+            lineDir[X] = nbrNode->x - node->x;
+            lineDir[Y] = nbrNode->y - node->y;
+            lineDir[Z] = nbrNode->z - node->z;
+
+            ZImage(param, &lineDir[X], &lineDir[Y], &lineDir[Z]);
+            lineMag2 = DotProduct(lineDir, lineDir);
+
+            if (lineMag2 < eps) {
+                continue;
+            }
+
+            NormalizeVec(lineDir);
+
+            burg[X] = node->burgX[armID];
+            burg[Y] = node->burgY[armID];
+            burg[Z] = node->burgZ[armID];
+            bMag = Normal(burg);
+
+            if (bMag > (1.0 + eps)) {
+                VECTOR_COPY(tjunc, lineDir);
+                binaryJunc = armID;
+                numArmJunc++;
+            } else {
+                CrossVector(burg, lineDir, normal);
+
+                if (fabs(DotProduct(normal, normal)) > 1.0e-2) {
+                    VECTOR_COPY(ndir[numArmEdge], normal);
+                    numArmEdge++;
+                }
+
+                numArmGlide++;
+            }
+        }
+
+        if ((numArmJunc == 1) && (numArmGlide == 2)) {
+            if (numArmEdge == 2) {
+                real8 collinearTol, tdir[3];
+
+                collinearTol = 1.0 - cos(angleTol);
+                CrossVector(ndir[0], ndir[1], tdir);
+                NormalizeVec(tdir);
+
+                *planarJunc =
+                    (fabs(fabs(DotProduct(tdir, tjunc)) - 1.0) <
+                     collinearTol);
+            } else if (numArmEdge == 1) {
+                *planarJunc =
+                    (fabs(DotProduct(ndir[0], tjunc)) < sin(angleTol));
+            } else {
+                *planarJunc = 1;
+            }
+        } else {
+            binaryJunc = -1;
+        }
+
+        return(binaryJunc);
+}
+
+
+/*---------------------------------------------------------------------------
+ *
  *	Function:	SplitMultiNodes
- *	Description:	This function examines all nodes with at least
- *			four arms and decides if the node should be split
- * 			and some of the node's arms moved to a new node.
- *			If it is determined this is necessary, the function
- *			will invoke the lower level SplitNode() function
- *			providing the list of arms to be moved to the new
- *			node.
+ *	Description:	This function examines nodes with at least four arms,
+ *                      plus eligible three-arm BCC binary junctions, and
+ *                      decides if a node should be split and some of its
+ *                      arms moved to a new node.  If it is determined this
+ *                      is necessary, the function invokes the lower-level
+ *                      SplitNode() function with the arms to move.
  *
  *			NOTE: All topology changes due to this function
- *			must be communicate to remote domains.  Currently
+ *			must be communicated to remote domains.  Currently
  *			these topology changes are combined with operations
  *			from the collision handling and distributed to
- *			remote daomins via CommSendRemesh()/FixRemesh()
+ *			remote domains via CommSendRemesh()/FixRemesh()
  *			calls in ParadisStep().
  *
  *-------------------------------------------------------------------------*/
@@ -1307,11 +1422,12 @@ void SplitMultiNodes(Home_t *home)
 #endif
 
 /*
- *	Loop through all native nodes; any node with at least 4 arms
- *	is a candidate for being split.
+ *	Loop through all native nodes.  Nodes with at least four arms and
+ *      eligible three-arm BCC binary junctions are split candidates.
  */
 	for (i = 0; i < home->newNodeKeyPtr; i++) {
-	        int   repositionNode1    =0;
+	                int   binaryJunc = -1;
+		        int   repositionNode1    =0;
 	        int   repositionNode2    =0;
 		int   repositionBothNodes=0;
 	        real8 minSplitDist;
@@ -1319,10 +1435,30 @@ void SplitMultiNodes(Home_t *home)
 	        real8 splitPos1[3] = { 0.0, 0.0, 0.0 };
 	        real8 splitPos2[3] = { 0.0, 0.0, 0.0 };
 
-		node = home->nodeKeys[i];
-		if (node ==(Node_t *)NULL) continue;
+			node = home->nodeKeys[i];
+			if (node ==(Node_t *)NULL) continue;
 
-		if (node->numNbrs < 4) continue;
+			if (HAS_ANY_OF_CONSTRAINTS(node->constraint, CORNER_NODE) &&
+			    (node->numNbrs != 2)) {
+			    REMOVE_CONSTRAINTS(node->constraint, CORNER_NODE);
+			}
+
+			if (node->numNbrs < 3) continue;
+
+			if (node->numNbrs == 3) {
+			    int   planarJunc;
+			    real8 tjunc[3];
+
+			    if ((!param->split3node) ||
+			        (param->materialType != MAT_TYPE_BCC)) {
+			        continue;
+			    }
+
+			    binaryJunc = BCC_binary_junction_node(home, node, tjunc,
+			                                                   &planarJunc);
+
+			    if ((binaryJunc < 0) || planarJunc) continue;
+			}
 
                 if (HAS_ANY_OF_CONSTRAINTS(node->constraint, SURFACE_NODE)) {
                     continue;
@@ -1427,11 +1563,15 @@ void SplitMultiNodes(Home_t *home)
                 origVel[Y] = node->vY;
                 origVel[Z] = node->vZ;
 
-                armList = (int *)calloc(1, (nbrs - 2) * sizeof(int));
-                armList2 = (int *)calloc(1, (nbrs - 2) * sizeof(int));
+                armList = (int *)calloc(1, (nbrs - 1) * sizeof(int));
+                armList2 = (int *)calloc(1, (nbrs - 1) * sizeof(int));
 
-		for (j = 0; j < numSets; j++) {
+			for (j = 0; j < numSets; j++) {
         	    int tmpRepositionNode1, tmpRepositionNode2;
+
+                    if ((nbrs == 3) && (armSets[j][binaryJunc] != 0)) {
+                        continue;
+                    }
 
 /*
  *                  Attempt to split the node.  If the split fails,
@@ -1522,12 +1662,24 @@ void SplitMultiNodes(Home_t *home)
  *                      the force/velocity of the two nodes appropriately.
  */
                         AdjustJuncNodeForceAndVel(home, splitNode1, &mobArgs1);
+                        AdjustJuncNodeForceAndVel(home, splitNode2, &mobArgs2);
+
+                        if (nbrs == 3) {
+                            Node_t *twoNode =
+                                (splitNode1->numNbrs == 2) ? splitNode1 :
+                                ((splitNode2->numNbrs == 2) ? splitNode2 :
+                                 (Node_t *)NULL);
+
+                            if (twoNode != (Node_t *)NULL) {
+                                twoNode->vX = 0.0;
+                                twoNode->vY = 0.0;
+                                twoNode->vZ = 0.0;
+                            }
+                        }
 
                         vd1 = (splitNode1->vX * splitNode1->vX) +
                               (splitNode1->vY * splitNode1->vY) +
                               (splitNode1->vZ * splitNode1->vZ);
-
-                        AdjustJuncNodeForceAndVel(home, splitNode2, &mobArgs2);
 
                         vd2 = (splitNode2->vX * splitNode2->vX) +
                               (splitNode2->vY * splitNode2->vY) +
@@ -1549,7 +1701,10 @@ void SplitMultiNodes(Home_t *home)
                             vd1Sqrt = sqrt(vd1);
                             vd2Sqrt = sqrt(vd2);
 
-                            if (fabs(vel1Dotvel2/vd1Sqrt/vd2Sqrt+1.0) < 0.01) {
+                            if (((nbrs != 3) || !param->enforceGlidePlanes) &&
+                                (vd1 > eps) && (vd2 > eps) &&
+                                (fabs(vel1Dotvel2/vd1Sqrt/vd2Sqrt+1.0) <
+                                 0.01)) {
 /*
  *                              In this case, the velocity of the two nodes
  *                              is nearly equal and opposite, so we'll treat
@@ -1711,6 +1866,19 @@ void SplitMultiNodes(Home_t *home)
                             mobError  = EvaluateMobility(home, splitNode1, &mobArgs1);
                             mobError |= EvaluateMobility(home, splitNode2, &mobArgs2);
 
+                            if (nbrs == 3) {
+                                Node_t *twoNode =
+                                    (splitNode1->numNbrs == 2) ? splitNode1 :
+                                    ((splitNode2->numNbrs == 2) ? splitNode2 :
+                                     (Node_t *)NULL);
+
+                                if (twoNode != (Node_t *)NULL) {
+                                    twoNode->vX = 0.0;
+                                    twoNode->vY = 0.0;
+                                    twoNode->vZ = 0.0;
+                                }
+                            }
+
 #ifdef ESHELBY
                             SegPartListClear(home);
 #endif
@@ -1770,7 +1938,8 @@ void SplitMultiNodes(Home_t *home)
  *                      highest energy release, save enough info to
  *                      perform this split later.
  */
-                        if ((powerTest - powerMax) > eps) {
+                        if (((powerTest - powerMax) > eps) &&
+                            ((nbrs != 3) || (powerTest > 1.0))) {
 
                             vel1[X] = splitNode1->vX;
                             vel1[Y] = splitNode1->vY;
@@ -2047,6 +2216,11 @@ void SplitMultiNodes(Home_t *home)
 
                     FoldBox(param, &pos2[X], &pos2[Y], &pos2[Z]);
 
+                    if (nbrs == 3) {
+                        VECTOR_COPY(pos1, splitPos1);
+                        VECTOR_COPY(pos2, splitPos2);
+                    }
+
 /*
  *                  Note: after the split, the arms selected to be split
  *                  will be connected to splitNode2 which will be
@@ -2075,6 +2249,15 @@ void SplitMultiNodes(Home_t *home)
                         free(armSets);
                         free(armList2);
                         continue;
+                    }
+
+                    if (nbrs == 3) {
+                        if (splitNode1->numNbrs == 2) {
+                            ADD_CONSTRAINTS(splitNode1->constraint, CORNER_NODE);
+                        }
+                        if (splitNode2->numNbrs == 2) {
+                            ADD_CONSTRAINTS(splitNode2->constraint, CORNER_NODE);
+                        }
                     }
 
 #ifdef FIX_PLASTIC_STRAIN

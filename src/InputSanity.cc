@@ -234,6 +234,7 @@ void InputSanity (Home_t *home)
  *      Make sure the frequency at which to do multi-node splits is > 0.
  */
         param->splitMultiNodeFreq = MAX(1, param->splitMultiNodeFreq);
+        param->split3node = (param->split3node != 0);
 
 /*
  *      If the user is defining 'trenches' for a faceted mobility

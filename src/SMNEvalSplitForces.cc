@@ -2,9 +2,10 @@
  *
  *      Module:       SMNEvalSplitForces
  *
- *      Description:  This function examines all nodes with at least
- *                    four arms and decides if the node should be split
- *                    and some of the node's arms moved to a new node.
+ *      Description:  This function evaluates nodes with at least four
+ *                    arms and eligible three-arm BCC binary junctions to
+ *                    decide if a node should be split and some of its arms
+ *                    moved to a new node.
  *                    If it is determined this is necessary, the function
  *                    will invoke the lower level SplitNode() function
  *                    providing the list of arms to be moved to the new
@@ -70,6 +71,7 @@ void SMNEvalSplitForces(Home_t *home, int nodeCount, SMN_Info_t *nodeInfo)
  *      Loop through all native multinodes
  */
         for (i = 0; i < nodeCount; i++) {
+            int    binaryJunc = -1;
             int    k;
             int    isGhostMultiNode;
             int    segID, setID, numNbrs;
@@ -89,6 +91,15 @@ void SMNEvalSplitForces(Home_t *home, int nodeCount, SMN_Info_t *nodeInfo)
  *          Make a backup copy of the multinode and each of its neighbors
  */
             numNbrs = node->numNbrs;
+
+            if (numNbrs == 3) {
+                int   planarJunc;
+                real8 tjunc[3];
+
+                binaryJunc = BCC_binary_junction_node(home, node, tjunc,
+                                                       &planarJunc);
+                if (planarJunc) binaryJunc = -1;
+            }
 
             bkupNodeCount = numNbrs + 1;
             bkupNodeList = (Node_t *)malloc(bkupNodeCount * sizeof(Node_t));
@@ -134,7 +145,7 @@ void SMNEvalSplitForces(Home_t *home, int nodeCount, SMN_Info_t *nodeInfo)
             origVel[Y] = node->vY;
             origVel[Z] = node->vZ;
 
-            armList = (int *)calloc(1, (numNbrs - 2) * sizeof(int));
+            armList = (int *)calloc(1, (numNbrs - 1) * sizeof(int));
 
 /*
  *          For each possible way to split the node, attempt the split,
@@ -145,12 +156,18 @@ void SMNEvalSplitForces(Home_t *home, int nodeCount, SMN_Info_t *nodeInfo)
             for (setID = 0; setID < totalSets; setID++) {
                 int    armIndex;
                 int    splitStatus, mobStatus, mergeStatus;
-                int    tmpRepositionNode1, tmpRepositionNode2;
+                int    tmpRepositionNode1 = 0, tmpRepositionNode2 = 0;
                 int    repositionBothNodes;
                 real8  vd1, vd2;
                 Node_t *splitNode1, *splitNode2;
                 Node_t *origNode, *newNode, *mergedNode;
                 MobArgs_t mobArgs1, mobArgs2;
+
+                if ((numNbrs == 3) &&
+                    ((binaryJunc < 0) ||
+                     (armSets[setID][binaryJunc] != 0))) {
+                    continue;
+                }
 
 /*
  *              Attempt to split the node.  If the split fails,
@@ -234,7 +251,7 @@ void SMNEvalSplitForces(Home_t *home, int nodeCount, SMN_Info_t *nodeInfo)
 #endif
                 mobStatus  = EvaluateMobility(home, splitNode1, &mobArgs1);
 
-                mobStatus  = EvaluateMobility(home, splitNode2, &mobArgs2);
+                mobStatus |= EvaluateMobility(home, splitNode2, &mobArgs2);
 
 #ifdef ESHELBY
                 SegPartListClear(home);
@@ -256,12 +273,24 @@ void SMNEvalSplitForces(Home_t *home, int nodeCount, SMN_Info_t *nodeInfo)
  *              the force/velocity of the two nodes appropriately.
  */
                 AdjustJuncNodeForceAndVel(home, splitNode1, &mobArgs1);
+                AdjustJuncNodeForceAndVel(home, splitNode2, &mobArgs2);
+
+                if (numNbrs == 3) {
+                    Node_t *twoNode =
+                        (splitNode1->numNbrs == 2) ? splitNode1 :
+                        ((splitNode2->numNbrs == 2) ? splitNode2 :
+                         (Node_t *)NULL);
+
+                    if (twoNode != (Node_t *)NULL) {
+                        twoNode->vX = 0.0;
+                        twoNode->vY = 0.0;
+                        twoNode->vZ = 0.0;
+                    }
+                }
 
                 vd1 = (splitNode1->vX * splitNode1->vX) +
                       (splitNode1->vY * splitNode1->vY) +
                       (splitNode1->vZ * splitNode1->vZ);
-
-                AdjustJuncNodeForceAndVel(home, splitNode2, &mobArgs2);
 
                 vd2 = (splitNode2->vX * splitNode2->vX) +
                       (splitNode2->vY * splitNode2->vY) +
@@ -289,7 +318,9 @@ void SMNEvalSplitForces(Home_t *home, int nodeCount, SMN_Info_t *nodeInfo)
                     vd1Sqrt = sqrt(vd1);
                     vd2Sqrt = sqrt(vd2);
 
-                    if (fabs(vel1Dotvel2/vd1Sqrt/vd2Sqrt+1.0) < 0.01) {
+                    if (((numNbrs != 3) || !param->enforceGlidePlanes) &&
+                        (vd1 > eps) && (vd2 > eps) &&
+                        (fabs(vel1Dotvel2/vd1Sqrt/vd2Sqrt+1.0) < 0.01)) {
 /*
  *                      In this case, the velocity of the two nodes
  *                      is nearly equal and opposite, so we'll treat

@@ -36,6 +36,31 @@
 extern int POSSIBLE_SPLITS[16];
 
 
+static int IsSplittableMultiNode(Home_t *home, Node_t *node)
+{
+        int   binaryJunc, planarJunc;
+        real8 tjunc[3];
+
+        if (node->numNbrs < 3) {
+            return(0);
+        }
+
+        if (node->numNbrs > 3) {
+            return(1);
+        }
+
+        if ((!home->param->split3node) ||
+            (home->param->materialType != MAT_TYPE_BCC)) {
+            return(0);
+        }
+
+        binaryJunc = BCC_binary_junction_node(home, node, tjunc,
+                                               &planarJunc);
+
+        return((binaryJunc >= 0) && !planarJunc);
+}
+
+
 /**************************************************************************
  *
  *      Function:    SMNGetArmSets
@@ -87,6 +112,10 @@ void SMNGetArmSets(int numNbrs, int *setCnt, int ***armSetList)
  */
         maxSets = POSSIBLE_SPLITS[numNbrs];
         maxSplitCnt = numNbrs >> 1;
+
+        if (numNbrs == 3) {
+            maxSplitCnt = 2;
+        }
 
         totalSets = 0;
         level = 0;
@@ -239,7 +268,7 @@ void BuildRecvDomList(Home_t *home, int lmnCount, SMN_Info_t *lmnInfo,
             int    j, cellID, newSize;
             Cell_t *cell;
 
-            if (lmnInfo[i].multiNode->numNbrs < 4) {
+            if (lmnInfo[i].multiNode->numNbrs < 3) {
                 continue;
             }
 
@@ -404,8 +433,8 @@ void BuildLocalMultiNodeList(Home_t *home, int *nodeCount,
         list = (SMN_Info_t *)NULL;
 
 /*
- *      Loop through all native nodes; any node with at least 4 arms
- *      is a candidate for being split.
+ *      Loop through all native nodes.  Nodes with at least four arms and
+ *      eligible three-arm BCC binary junctions are split candidates.
  */
         for (i = 0; i < home->newNodeKeyPtr; i++) {
             int    numSplits;
@@ -415,7 +444,12 @@ void BuildLocalMultiNodeList(Home_t *home, int *nodeCount,
                 continue;
             }
 
-            if (node->numNbrs < 4) {
+            if (HAS_ANY_OF_CONSTRAINTS(node->constraint, CORNER_NODE) &&
+                (node->numNbrs != 2)) {
+                REMOVE_CONSTRAINTS(node->constraint, CORNER_NODE);
+            }
+
+            if (!IsSplittableMultiNode(home, node)) {
                 continue;
             }
 
@@ -500,7 +534,12 @@ void BuildGhostMultiNodeList(Home_t *home, int *nodeCount,
 
             ghostNode = home->ghostNodeList[i];
 
-            if (ghostNode->numNbrs < 4) {
+            if (HAS_ANY_OF_CONSTRAINTS(ghostNode->constraint, CORNER_NODE) &&
+                (ghostNode->numNbrs != 2)) {
+                REMOVE_CONSTRAINTS(ghostNode->constraint, CORNER_NODE);
+            }
+
+            if (!IsSplittableMultiNode(home, ghostNode)) {
                 continue;
             }
 
