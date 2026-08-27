@@ -1,0 +1,63 @@
+Complete simulation lifecycle
+- From main() through initialization, timestep loop, checkpointing, restart, and shutdown.
+- Files: ParaDiS.cc, ParadisInit.cc, Initialize.cc, ParadisStep.cc, ParadisFinish.cc.
+
+Data structures and memory ownership
+- Explain Home_t, Param_t, Node_t, segment structures, domain data, and ownership rules.
+- Include allocation/freeing paths and MPI ownership.
+
+Force calculation pipeline
+- Detailed path for self-force, elastic forces, applied stress, image forces, and FMM.
+- Files: ComputeForces.cc, NodeForce.cc, FMM.cc, ElasticConstants.cc.
+
+Mobility-law architecture
+- How mobility laws are registered, selected, initialized, and called.
+- Compare BCC, HCP, FCC, nonlinear, climb, glide, and custom mobility laws.
+
+Time integration and adaptive timestep control
+- Forward Euler, trapezoid, implicit/trapezoid solver, KINSOL, subcycling, timestep rejection, and tolerance handling.
+
+Topology and remeshing internals
+- Extend the existing guide with node splitting, collision handling, junction formation, segment merging, constraints, and parallel synchronization.
+
+MPI domain decomposition
+- Domain geometry, ghost nodes, ownership migration, communication buffers, decomposition strategies, and load balancing.
+- Files: Decomp.cc, Comm*.cc, Home_t domain members.
+
+Restart and I/O formats
+- Text and binary restart layouts, control snapshots, nodal records, HDF5 handling, parallel I/O groups, and backward compatibility.
+
+Material and elasticity model
+- Elastic constants, isotropic/anisotropic modes, Burgers vectors, glide planes, crystal orientations, and material tables.
+
+FMM and Eshelby implementation
+- Tree construction, multipole expansion, correction tables, inclusion handling, image stresses, and performance tradeoffs.
+
+Control-parameter reference
+- A generated table for every registered parameter:
+  - keyword
+  - Param_t field
+  - type and count
+  - default
+  - validation rules
+  - consuming source files
+  - example value
+
+Error handling and debugging guide
+- Fatal, warnings, assertions, MPI failures, common invalid-control-file errors, and recommended debugger breakpoints.
+
+Testing and verification guide
+- Existing test fixtures, expected node/segment counts, one-step tests, MPI tests, restart reproducibility, and regression checks.
+
+Performance and parallelism guide
+- Profiling hotspots, OpenMP/GPU paths, FMM scaling, MPI communication costs, and I/O performance.
+
+Developer extension guide
+- How to add a new parameter, mobility law, force term, material, topology rule, output field, or restart field.
+
+The highest-value next documents would be:
+1. Complete simulation lifecycle
+2. Data structures and memory ownership
+3. Force calculation pipeline
+4. MPI domain decomposition
+5. Complete control-parameter reference
