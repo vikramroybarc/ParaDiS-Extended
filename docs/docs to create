@@ -2,10 +2,6 @@ Complete simulation lifecycle
 - From main() through initialization, timestep loop, checkpointing, restart, and shutdown.
 - Files: ParaDiS.cc, ParadisInit.cc, Initialize.cc, ParadisStep.cc, ParadisFinish.cc.
 
-Data structures and memory ownership
-- Explain Home_t, Param_t, Node_t, segment structures, domain data, and ownership rules.
-- Include allocation/freeing paths and MPI ownership.
-
 Force calculation pipeline
 - Detailed path for self-force, elastic forces, applied stress, image forces, and FMM.
 - Files: ComputeForces.cc, NodeForce.cc, FMM.cc, ElasticConstants.cc.
@@ -57,7 +53,6 @@ Developer extension guide
 
 The highest-value next documents would be:
 1. Complete simulation lifecycle
-2. Data structures and memory ownership
-3. Force calculation pipeline
-4. MPI domain decomposition
-5. Complete control-parameter reference
+2. Force calculation pipeline
+3. MPI domain decomposition
+4. Complete control-parameter reference

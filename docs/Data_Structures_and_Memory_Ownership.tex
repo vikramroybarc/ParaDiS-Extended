@@ -1,0 +1,908 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{booktabs,tabularx,array,longtable}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+
+\definecolor{codebg}{RGB}{247,247,247}
+\definecolor{codeframe}{RGB}{205,205,205}
+\definecolor{codecomment}{RGB}{0,105,75}
+\definecolor{codekeyword}{RGB}{25,65,145}
+
+\lstdefinestyle{base}{
+  basicstyle=\ttfamily\footnotesize,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  breaklines=true,
+  breakatwhitespace=false,
+  frame=single,
+  rulecolor=\color{codeframe},
+  backgroundcolor=\color{codebg},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=7pt,
+  xleftmargin=1.5em,
+  framexleftmargin=1em,
+  aboveskip=0.8em,
+  belowskip=0.8em
+}
+
+\lstdefinestyle{cpp}{
+  style=base,
+  language=C++,
+  keywordstyle=\color{codekeyword}\bfseries,
+  commentstyle=\color{codecomment},
+  stringstyle=\color{purple!65!black}
+}
+
+\lstdefinestyle{data}{
+  style=base,
+  language={}
+}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!55!black,
+  urlcolor=blue!65!black,
+  citecolor=blue!55!black,
+  pdftitle={Data Structures and Memory Ownership in ParaDiS},
+  pdfsubject={Developer guide to storage, aliases, lifetimes, and MPI ownership}
+}
+
+\setlist{nosep,leftmargin=*}
+\setlist[description]{style=nextline,leftmargin=0pt,labelindent=0pt,
+                      labelwidth=0pt,labelsep=0pt,
+                      font=\normalfont\bfseries}
+\setcounter{tocdepth}{2}
+\emergencystretch=2em
+\newcommand{\code}[1]{\texorpdfstring{\nolinkurl{#1}}{#1}}
+\newcommand{\srcfile}[1]{\texorpdfstring{\nolinkurl{#1}}{#1}}
+
+\title{Data Structures and Memory Ownership in ParaDiS\\
+       \large Developer Guide to Storage, Aliases, Lifetimes, and MPI State}
+\author{ParaDiS-Extended Development Notes}
+\date{August 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+ParaDiS is a C/C++ hybrid whose production data structures are managed mainly
+by procedural allocation, intrusive queues, sparse pointer tables, and
+phase-specific MPI buffers.  A C++ pointer type therefore does not, by itself,
+say whether a caller owns an object.  This guide documents the concrete
+storage model: the per-rank \code{Home_t} root, \code{Param_t}, pooled
+\code{Node_t} objects and their arm arrays, implicit and materialized segment
+records, spatial cells, remote and mirror domains, inclusions, FMM state, and
+important scratch structures.  It traces their allocation, reuse,
+invalidation, migration, and final release paths.
+
+The guide is written against repository commit \code{95b2842}.  It describes
+the implementation as it exists, including several sharp edges that extension
+code must respect.  Source files remain authoritative after later changes.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{The ownership model in one page}
+
+\subsection{Three meanings of ``owner''}
+
+ParaDiS uses the word \emph{owner} for three different relationships.  They
+must not be conflated.
+
+\begin{description}
+\item[Storage owner]
+The component responsible for releasing an allocation.  For example,
+\code{home->nodeBlockQ} owns production \code{Node_t} storage, while
+\code{home->nodeKeys} only indexes those nodes.
+
+\item[Domain or logical owner]
+The MPI domain that holds the authoritative state for an entity.  A native
+node has a local \code{myTag.domainID}; a ghost node is stored in local memory
+but its tag names a remote logical owner.
+
+\item[Operation owner]
+The rank or endpoint selected to perform a calculation or topology mutation
+once.  Routines such as \code{NodeOwnsSeg()} and \code{DomainOwnsSeg()} choose
+work responsibility; they do not decide who frees memory.
+\end{description}
+
+Whenever this guide says \emph{owns} without qualification, it means storage
+ownership.
+
+\subsection{Per-rank ownership tree}
+
+\begin{center}
+\fbox{\parbox{0.92\linewidth}{
+\ttfamily
+Home\_t (one per MPI rank)\par
+\quad |-- owns Param\_t and most rank-global arrays\par
+\quad |-- owns NodeBlock\_t chain\par
+\quad |\qquad `-- owns actual Node\_t slots\par
+\quad |\qquad\quad `-- each active/recycled node owns arm arrays\par
+\quad |-- owns Cell\_t hash entries and their integer arrays\par
+\quad |\qquad `-- cell nodeQ borrows pooled Node\_t objects\par
+\quad |-- owns RemoteDomain\_t records and lookup-array storage\par
+\quad |\qquad `-- lookup entries borrow pooled ghost Node\_t objects\par
+\quad |-- owns flat Eshelby inclusion storage when enabled\par
+\quad |-- owns decomposition, FMM, operation-list, and scratch state\par
+\quad `-- temporarily owns subcycling and communication state
+}}
+\end{center}
+
+The same pooled node can be visible simultaneously through a tag lookup, a
+ghost traversal array, and a cell queue.  These are aliases, not additional
+owners.  Freeing through any of them would corrupt the pool.
+
+\subsection{Lifetime classes}
+
+\begin{longtable}{@{}p{0.18\linewidth}p{0.30\linewidth}p{0.44\linewidth}@{}}
+\toprule
+Lifetime & Typical structures & Boundary that invalidates or releases them \\
+\midrule
+\endhead
+Process/rank & \code{Home_t}, \code{Param_t}, node blocks, persistent cell
+hash entries & \code{ReleaseMemory()} at normal shutdown \\
+Decomposition epoch & active \code{cellList}, cell/domain intersections,
+\code{RemoteDomain_t} records & \code{DLBfreeOld()} followed by decomposition
+and communication-neighbor rebuild \\
+Outer cycle & ghost population, collision grid, some force and inclusion
+scratch & migration, ghost recycle, resort, and the producer's clear routine \\
+Algorithm phase & segment lists/pairs, migration buffers, topology receive
+buffers, mirror snapshots & caller cleanup after the relevant computation or
+after MPI completion \\
+Call/local scope & temporary arrays and copied value records & return path of
+the allocating routine \\
+\bottomrule
+\end{longtable}
+
+\section{Source map}
+
+\begin{longtable}{@{}p{0.38\linewidth}p{0.56\linewidth}@{}}
+\toprule
+File & Ownership responsibility \\
+\midrule
+\endhead
+\srcfile{include/Home.h} & Per-rank root and memory-wrapper macros. \\
+\srcfile{include/Param.h}, \srcfile{include/Typedefs.h} & Configuration,
+parser registry records, and shared value types. \\
+\srcfile{include/Node.h}, \srcfile{src/Node.cc}, \srcfile{src/Util.cc} & Node
+layout and the C++ and legacy arm-management families. \\
+\srcfile{src/QueueOps.cc}, \srcfile{src/GetNewNativeNode.cc},
+\srcfile{src/GetNewGhostNode.cc} & Node-block allocation, pool transitions,
+and active lookup installation. \\
+\srcfile{include/Segment.h}, \srcfile{include/SegmentPair.h},
+\srcfile{src/Segment.cc} & Derived segment views and C++ list ownership. \\
+\srcfile{include/Cell.h}, \srcfile{src/CellTable.cc},
+\srcfile{src/SortNativeNodes.cc}, \srcfile{src/DLBfreeOld.cc} & Persistent
+cell storage and decomposition-epoch views. \\
+\srcfile{include/RemoteDomain.h}, \srcfile{src/InitRemoteDomains.cc},
+\srcfile{src/CommSendGhosts.cc} & Remote-domain metadata, ghost lookups, and
+message buffers. \\
+\srcfile{src/Migrate.cc}, \srcfile{src/RemapInitialTags.cc} & Ownership
+transfer, retagging, and temporary tag maps. \\
+\srcfile{src/RemoteOps.cc}, \srcfile{src/CommSendRemesh.cc},
+\srcfile{src/FixRemesh.cc} & Persistent operation-list storage and transferred
+receive-buffer ownership. \\
+\srcfile{src/FMComm.cc}, \srcfile{src/SubcyclingIntegrator.cc} & FMM hierarchy
+and C++ cycle-scoped subcycling state. \\
+\srcfile{src/ParadisFinish.cc} & Ordered final cleanup. \\
+\bottomrule
+\end{longtable}
+
+For graph mutation invariants and distributed topology replay, see
+\srcfile{docs/Topology_and_Remesh_code.tex}.  For parameter registration and
+broadcast details, see \srcfile{docs/Control_File_to_ParaDiS_Simulation_code.tex}.
+
+\section{Home\_t: the per-rank root}
+
+\subsection{Construction}
+
+\code{InitHome()} deliberately zero-initializes the root.  Most pointer fields
+therefore begin as null and most counters begin at zero.
+
+\lstinputlisting[style=cpp,firstline=14,lastline=24,firstnumber=14]{../src/InitHome.cc}
+
+Initialization then attaches independently allocated subsystems to this
+root.  The important groups in \code{Home_t} are:
+
+\begin{itemize}
+\item rank, cycle, cached domain-boundary, and timing values;
+\item the owned \code{Param_t} and rank-zero-only parser registries;
+\item node-block ownership, node queues, lookup arrays, and the recycled-tag
+heap;
+\item persistent cell hash buckets plus the decomposition-epoch cell list;
+\item remote-domain tables, communication request/status arrays, and buffers;
+\item the generic decomposition pointer and optional FMM hierarchy;
+\item topology operation storage, collision grids, tag maps, reduction
+buffers, material tables, and solver state.
+\end{itemize}
+
+\code{Home_t} is an aggregation root, not an RAII container.  Its members use
+different allocation families and require subsystem-specific cleanup such as
+\code{FreeDecomp()}, \code{FMFree()}, and \code{FreeOpList()}.
+
+\subsection{Procedural teardown}
+
+Normal termination runs output and solver cleanup, releases MPI groups,
+finalizes MPI, and then calls \code{ReleaseMemory()}.  The cleanup order is
+intentional:
+
+\begin{enumerate}
+\item \code{DLBfreeOld()} invalidates decomposition-epoch cell and remote
+aliases.
+\item \code{FreeCellTable()} and subsystem destructors release nested
+allocations.
+\item every pooled node's remaining arm arrays and lock are released before
+its raw node block is freed;
+\item lookup arrays, heaps, operation storage, decomposition data, material
+tables, parser registries, and optional arrays are released;
+\item \code{Param_t} is freed late because earlier destructors consult it;
+\item reduction buffers and finally \code{Home_t} itself are freed.
+\end{enumerate}
+
+The beginning of the implementation shows the alias-first ordering and the
+manual walk over raw node blocks:
+
+\lstinputlisting[style=cpp,firstline=40,lastline=137,firstnumber=40]{../src/ParadisFinish.cc}
+
+Preserve this ordering when adding a long-lived subsystem.  A destructor that
+needs a control value or lookup table must run before that dependency is
+released.
+
+\section{Param\_t and parsing metadata}
+
+\subsection{What Param\_t contains}
+
+Every MPI rank owns one \code{Param_t}.  It combines user controls, derived
+constants, function pointers selected during initialization, evolving global
+statistics, and output counters.  Most fields are inline scalars or fixed
+arrays.  The notable direct heap member is
+\code{partialDisloDensity}, allocated according to the selected Burgers-vector
+group count and freed before the surrounding \code{Param_t}.
+
+Rank zero allocates \code{ctrlParamList} and \code{dataParamList}.  Each list
+owns a growable \code{VarData_t[]} registration array.  A registration's
+\code{valList}, however, is a borrowed address, normally into the live
+\code{Param_t}; it must not be freed separately.
+
+\begin{longtable}{@{}p{0.26\linewidth}p{0.24\linewidth}p{0.42\linewidth}@{}}
+\toprule
+Object/member & Storage relationship & Release rule \\
+\midrule
+\endhead
+\code{home->param} & Home-owned object on every rank & Free nested
+\code{partialDisloDensity}, then free \code{Param_t} \\
+\code{ctrlParamList}, \code{dataParamList} & Home-owned, task-zero registry
+objects & Free each \code{varList}, then each list object \\
+\code{VarData_t::valList} & Borrowed pointer into registered storage & Never
+free through the registry \\
+mobility function pointers & Non-owning executable addresses & Re-select on
+each rank; no deallocation \\
+\bottomrule
+\end{longtable}
+
+\subsection{MPI broadcast caveat}
+
+Initialization broadcasts the raw bytes of \code{Param_t}.  Pointer-bearing
+parser registries are therefore kept on task zero rather than broadcast.  The
+mobility function pointers are selected after the broadcast, and dynamically
+sized parameter data is allocated on the receiving rank.  Any new heap-backed
+parameter field needs an explicit serialization/allocation policy; adding a
+pointer to the structure without one would copy a meaningless process-local
+address.
+
+\section{Tag\_t and network identity}
+
+\code{Tag_t} is a small value type containing \code{domainID} and
+\code{index}; it owns no memory.  A tag is resolved through one of two sparse
+views:
+
+\begin{itemize}
+\item a local tag uses \code{home->nodeKeys[tag.index]};
+\item a remote tag uses
+\code{home->remoteDomainKeys[tag.domainID]->nodeKeys[tag.index]}.
+\end{itemize}
+
+Remote resolution may legitimately return null when the rank does not
+currently hold that ghost.  Use \code{GetNodeFromTag()} or
+\code{GetNodeFromIndex()} instead of duplicating unchecked table traversal.
+
+A tag is more durable than a raw pointer across ordinary local calculations,
+but it is not permanent identity across ownership transfer.  Migration and
+some initialization/compaction paths assign new tags and build temporary
+\code{TagMap_t} value records.  \code{DistributeTagMaps()} communicates and
+applies those mappings to neighbor arms, then consumes the map.  Code that
+spans migration must participate in remapping or rebuild its keys afterward.
+
+\section{Node\_t: vertex state and endpoint-owned arms}
+
+\subsection{Layout}
+
+\lstinputlisting[style=cpp,firstline=141,lastline=205,firstnumber=141]{../include/Node.h}
+
+A \code{Node_t} is both a dislocation-network vertex and the storage for all
+data attached to its incident arms.  Arrays indexed by arm number include the
+neighbor tag, per-endpoint force, Burgers vector, glide-plane normal, and
+local/remote stress contributions.  Consequently:
+
+\begin{itemize}
+\item the persistent graph has no single canonical heap object for a
+segment;
+\item arm index \(i\) has meaning only while the node's arm arrays keep their
+current layout;
+\item topology operations must update both endpoints' arm records and preserve
+reciprocal neighbor tags, Burgers-vector sign conventions, and compatible
+glide planes;
+\item inserting, removing, or reallocating arms invalidates saved arm-array
+pointers and can shift saved arm indices.
+\end{itemize}
+
+Use the topology helpers such as \code{InsertArm()},
+\code{ChangeConnection()}, \code{ChangeArmBurg()}, \code{SplitNode()}, and
+\code{MergeNode()} rather than editing parallel arrays independently.
+
+\subsection{Two active arm-allocation families}
+
+The codebase contains two distinct ownership paths:
+
+\begin{description}
+\item[Legacy production helpers]
+\code{AllocNodeArms()}, \code{ReallocNodeArms()}, and \code{FreeNodeArms()}
+manage the main simulation arrays: \code{nbrTag}, the Burgers, glide-plane,
+and force arrays, plus \code{sigbLoc} and \code{sigbRem}.  A same-degree
+allocation reuses capacity and reinitializes entries.  These helpers do not
+generally own \code{nbrIndex}, \code{armCoordIndex}, or
+\code{armNodeIndex}.
+
+\item[C++ Node\_t methods]
+\code{Node_t::Allocate_Arms()}, \code{Free_Arms()}, and \code{Recycle()}
+manage all declared per-arm pointers.  The C++ destructor calls
+\code{Recycle()}, and copy assignment deep-copies the arrays.
+\end{description}
+
+Production pool nodes are raw-\code{calloc}ed and later raw-\code{free}d, so
+their constructors and destructors do not run.  The production pool must use
+the legacy/manual cleanup path consistently.  Topology backup helpers form an
+additional synchronized deep-copy path and contain an in-source warning that
+their array lists must stay aligned with \srcfile{src/Util.cc}.
+
+Do not mix these families.  In particular, calling the narrower legacy free
+routine after allocating all C++ auxiliary arrays can leak or strand those
+auxiliaries.
+
+\subsection{Logical deletion retains capacity}
+
+\lstinputlisting[style=cpp,firstline=1316,lastline=1379,firstnumber=1316]{../src/Util.cc}
+
+\code{FreeNode()} means ``remove this logical native node and recycle its
+slot.''  It does not free the object and intentionally does not free its arm
+arrays.  The next user of that pool slot may reuse the capacity.  Creation and
+unpack paths must therefore initialize every scalar and array entry they rely
+on; zero-initialization occurred only when the block was first allocated.
+
+\section{The node pool and its non-owning views}
+
+\subsection{Block allocation}
+
+When the free queue is empty, \code{PopFreeNodeQ()} allocates a raw
+\code{NodeBlock_t} header and a zeroed array of
+\code{NODE_BLOCK_COUNT} nodes, links the block into
+\code{home->nodeBlockQ}, initializes locks, and places all slots on the free
+queue.
+
+\lstinputlisting[style=cpp,firstline=18,lastline=60,firstnumber=18]{../src/QueueOps.cc}
+
+Although \code{NodeBlock_t} also has a C++ constructor using \code{new[]}
+and a destructor using \code{delete[]}, that is not the main runtime path.
+Never destroy a production pool block with the C++ path, or destroy a C++
+block with \code{free()}.
+
+\subsection{Pool state machine}
+
+\begin{center}
+\fbox{\parbox{0.91\linewidth}{
+\centering
+raw block slot on \code{freeNodeQ}
+\(\longrightarrow\) install as native in \code{nodeKeys}
+or as ghost in remote \code{nodeKeys}
+\(\longrightarrow\) use through lookup/cell/ghost views
+\(\longrightarrow\) detach and recycle
+\(\longrightarrow\) same address may represent a different tag
+}}
+\end{center}
+
+Native creation obtains the lowest recycled tag index when possible; otherwise
+it advances the key high-water mark and grows \code{nodeKeys}.  Deletion
+places the tag index into a min-heap, nulls the authoritative local key entry,
+and returns the node to the free queue.
+
+The address of a pool slot is stable until final teardown, but its
+\emph{identity is not}.  A cached \code{Node_t*} can silently become a
+different node after recycle and reuse.  Pointer stability is therefore not
+object-lifetime stability.
+
+\subsection{Views into the pool}
+
+\begin{longtable}{@{}p{0.26\linewidth}p{0.26\linewidth}p{0.40\linewidth}@{}}
+\toprule
+View & Meaning & Validity rule \\
+\midrule
+\endhead
+\code{home->nodeKeys} & Sparse authoritative native lookup by local tag index
+& Entries can be null; the pointer array may move when grown \\
+\code{RemoteDomain_t::nodeKeys} & Sparse lookup of currently materialized
+ghosts from one domain & Replaced during ghost communication and destroyed on
+decomposition rebuild \\
+\code{freeNodeQ}, \code{ghostNodeQ}, \code{nativeNodeQ} & Intrusive queue
+heads using \code{Node_t::next} & A node can occupy only one of these queues;
+\code{nativeNodeQ} is a compatibility/startup view, not the steady-state
+authoritative collection \\
+\code{ghostNodeList} & Dense pointer view for threaded ghost traversal & Only
+entries below \code{ghostNodeCount} are active; array storage may move on
+growth \\
+\code{Cell_t::nodeQ} & Intrusive spatial membership using
+\code{nextInCell} & Rebuilt by sorting and invalid after cell reset/rebalance \\
+\bottomrule
+\end{longtable}
+
+\code{PushGhostNodeQ()} updates both the intrusive queue and dense pointer
+array.  Its source contract requires one writer and forbids concurrent ghost
+traversal during update.  Removed ghosts are not necessarily unlinked from
+the whole queue immediately, so the queue alone is not a reliable list of
+active ghosts.
+
+\subsection{Ghost batch recycling}
+
+\lstinputlisting[style=cpp,firstline=146,lastline=169,firstnumber=146]{../src/QueueOps.cc}
+
+Batch recycling splices ghost slots onto the free queue and resets only the
+active ghost count and queue heads.  It does not free arms or clear all old
+pointer values.  Consumers must honor counts and phase boundaries, not merely
+test whether an old pointer value is non-null.
+
+\section{Segments are usually derived views}
+
+The persistent network edge is represented twice, once in each endpoint's
+arm arrays.  \code{Segment_t} materializes a convenient record containing
+borrowed \code{Node_t*} endpoints and copied positions, force values, Burgers
+vector, glide plane, cell, and native flags.  Its destructor destroys its
+lock when applicable; it never deletes either endpoint.
+
+\code{SegmentPair_t} borrows two \code{Segment_t*} records and owns no nested
+memory.  Thus the common hierarchy is:
+
+\begin{center}
+\fbox{\parbox{0.88\linewidth}{
+caller owns segment-array storage
+\(\rightarrow\) each \code{Segment_t} borrows pooled nodes
+\(\rightarrow\) a pair list owns or borrows pair-array storage
+\(\rightarrow\) each pair borrows segment records
+}}
+\end{center}
+
+The allocator for the outer list determines its release rule.  The C++
+\code{Segment_List_Create()} and \code{Segment_Append()} family grows arrays
+with \code{new Segment_t[]} and releases replaced arrays with
+\code{delete[]}; callers must ultimately \code{delete[]} the returned list.
+Some force kernels instead build C-allocated scratch segment arrays and free
+them before returning.  Follow the producing API rather than assuming all
+\code{Segment_t*} pointers have the same allocator.
+
+No segment view may outlive its endpoint population.  Rebuild segment and
+pair lists after topology, migration, or ghost refresh.
+
+\section{Cells, collision grids, and inclusions}
+
+\subsection{Persistent Cell\_t storage}
+
+\lstinputlisting[style=cpp,firstline=11,lastline=41,firstnumber=11]{../include/Cell.h}
+
+\code{home->cellTable} is a hash table that owns all allocated
+\code{Cell_t} records.  \code{AddCellToTable()} uses \code{calloc()} and
+links a new cell into a bucket.  Cells intentionally remain in the hash table
+for the whole run to avoid repeated structural allocation.
+
+A cell owns its \code{nbrList} and \code{domains} integer arrays.  It does not
+own the nodes reachable through \code{nodeQ}; those are pooled nodes linked by
+\code{nextInCell}.  With Eshelby support, \code{inclusionQ} is an integer
+index into the flat Home-owned inclusion array rather than a pointer.
+
+On load rebalance, \code{DLBfreeOld()} retains cell structs and static
+neighbor lists but clears active flags and queues, frees dynamic domain lists
+and \code{cellList}, and releases remote-domain metadata.  The new
+decomposition rebuilds these views.  At final shutdown,
+\code{FreeCellTable()} releases cell-owned arrays, locks, and cell records.
+
+\subsection{Collision cell2}
+
+The collision overlay is Home-owned scratch.  \code{home->cell2} stores queue
+heads, and \code{cell2QentArray} stores entries containing borrowed node
+pointers plus integer next links.  Sorting rebuilds it for collision use;
+\code{FreeNode()} removes nodes from this view before recycling them.  Neither
+array owns a node.
+
+\subsection{Eshelby inclusion storage}
+
+\code{EInclusion_t} is a pointer-free value record.  The Home-owned inclusion
+array, \code{eshelbyInclusions}, is contiguous and reallocatable.  Locally
+owned inclusions come first and ghost inclusions follow them.  Migration and
+ghost exchange can compact or reallocate the array, so code must not retain
+an \code{EInclusion_t*} across those phases.  Cell queues use integer indices
+and are rebuilt after ownership changes.
+
+\code{segpartIntersectList} is a growable, phase-scoped list keyed by copied
+segment tags and inclusion indices.  Its producer serializes appends with the
+associated lock and clears/frees the list after use.  Saved pointers into the
+list are invalid after a growth operation.
+
+\section{MPI domains, ghosts, and migration}
+
+\subsection{RemoteDomain\_t ownership}
+
+\lstinputlisting[style=cpp,firstline=16,lastline=31,firstnumber=16]{../include/RemoteDomain.h}
+
+\code{home->remoteDomainKeys} owns a domain-ID-indexed table of remote-domain
+records, while \code{home->remoteDomains} is a dense list of active IDs with
+primary neighbors before secondary-only neighbors.  Each remote record owns:
+
+\begin{itemize}
+\item its \code{expCells} array when present;
+\item the storage for its sparse \code{nodeKeys} pointer table, but not the
+pooled ghost nodes referenced by its entries;
+\item \code{inBuf} and \code{outBuf} only for the protocol phase that
+allocated or received them.
+\end{itemize}
+
+Persistent Home-level MPI request and status arrays are allocated when remote
+domains are initialized.  Protocol-specific buffers must remain allocated
+until the matching nonblocking requests complete.
+
+The fields \code{inBufLen} and \code{outBufLen} are protocol-polymorphic:
+several ghost, velocity, and remesh paths treat them as bytes, while
+secondary-ghost phases use element counts.  Interpret a length only within
+the protocol that set it.
+
+\subsection{End-of-cycle ordering}
+
+\lstinputlisting[style=cpp,firstline=525,lastline=541,firstnumber=525]{../src/ParadisStep.cc}
+
+This sequence is a lifetime contract:
+
+\begin{enumerate}
+\item \code{Migrate()} transfers natives that crossed a domain boundary.
+\item \code{RecycleGhostNodes()} makes old ghost pool slots reusable.
+\item \code{SortNativeNodes()} clears and rebuilds cell membership from the
+authoritative native key table.
+\item \code{CommSendGhosts()} replaces remote lookup tables and materializes
+the new ghost population.
+\end{enumerate}
+
+Between recycle and replacement, old remote lookup storage or old
+\code{ghostNodeList} slots may still contain pointer values to reusable pool
+slots.  They are not valid ghosts.  Do not resolve remote tags or traverse
+stale entries in that interval.
+
+\subsection{Migration transfers logical ownership, not storage blocks}
+
+Migration performs a value transfer:
+
+\begin{enumerate}
+\item the source selects outgoing native nodes and serializes their scalar and
+arm data into caller-owned send buffers;
+\item after packing a node, the source calls \code{FreeNode()}, making its
+local pool slot and tag index reusable while retaining arm capacity;
+\item the destination obtains a slot from its own local pool, assigns a new
+local tag, allocates or reuses arms, and unpacks values;
+\item the destination records \code{oldTag -> newTag};
+\item \code{DistributeTagMaps()} repairs neighbor tags across ranks and frees
+the temporary mapping storage;
+\item send/receive arrays are released only after communication completes.
+\end{enumerate}
+
+No \code{Node_t} allocation crosses MPI.  The source and destination each own
+their own storage, and only serialized values cross the wire.
+
+\subsection{Operation ownership for cross-domain segments}
+
+\code{DomainOwnsSeg()} gives same-domain segments to that domain.  For a
+cross-domain segment it alternates the responsible rank by even/odd cycle;
+remesh responsibility is the inverse of collision/separation responsibility.
+This creates deterministic, balanced mutation authority.  It has no bearing
+on node-block, arm-array, or communication-buffer deallocation.
+
+\subsection{Topology operation buffers}
+
+\code{home->opListBuf} is a persistent, growable byte buffer.  Initialization
+allocates an initial capacity, \code{ClearOpList()} resets used length while
+retaining capacity, and \code{FreeOpList()} releases it at shutdown.
+Operation records are packed value snapshots, not owners of live pointers.
+
+The remesh communication path has a special alias: one send-buffer entry can
+refer directly to \code{home->opListBuf}, while other entries are allocated
+copies.  The communication cleanup must not free the aliased persistent
+entry.  Receive-buffer ownership is transferred to \code{FixRemesh()}, which
+consumes and frees it.
+
+\subsection{Mirror domains}
+
+Only task zero creates \code{MirrorDomain_t} snapshots for plotting/output.
+A mirror owns its key-array storage, remote-arm coordinate arrays, and optional
+copied inclusion array.  Its node-key entries point to nodes obtained from the
+same common pool; \code{MirrorDomain_Free()} releases mirror-owned arrays and
+returns those nodes to the free queue.  Mirror nodes are output snapshots, not
+primary ghosts, and their pointers are invalid after mirror cleanup.
+
+\section{Other owned subsystems}
+
+\subsection{Initialization staging: InData\_t}
+
+\code{InData_t} exists only during startup.  It owns a block-read node array
+and those nodes' arm arrays, compatibility Burgers arrays for older inputs,
+and the input decomposition.  Its \code{param} field borrows the live
+\code{Param_t}.  \code{FreeInitArrays()} deep-frees the staging allocations,
+then initialization frees the container.  The steady-state
+\code{home->decomp} is independently constructed/broadcast and is not an
+alias of the freed staging decomposition.
+
+\subsection{Generic decomposition pointer}
+
+\code{home->decomp} is an owned \code{void*} whose concrete layout depends on
+the selected decomposition type.  Recursive sectioning owns nested boundary
+arrays; recursive bisection owns a tree.  Always release it through
+\code{FreeDecomp(home, home->decomp)}.  A plain \code{free()} cannot traverse
+either representation correctly.
+
+\subsection{FMM hierarchy}
+
+When enabled, Home owns a \code{FMLayer_t[]} hierarchy.  Each layer owns
+communication-domain arrays, a cell-ID list, and hash entries.  Each
+\code{FMCell_t} owns domain-intersection and multipole/expansion coefficient
+arrays; its next/previous fields are only hash links.  Initial setup creates
+the static hierarchy, while load-balance refreshes recompute dynamic
+intersection data.  Treat \code{FMInit()} and \code{FMFree()} as the
+constructor/destructor boundary rather than freeing nested fields from force
+callers.
+
+\subsection{Subcycling state}
+
+\code{Subcycling_t} is deliberately opaque outside
+\srcfile{src/SubcyclingIntegrator.cc}.  It is a true C++ owner of STL maps and
+vectors and is created with \code{new} by \code{StartSubcycling()} and
+destroyed with \code{delete} by \code{FinishSubcycling()}.  Its contract limits
+it to one outer cycle and ends it before topology or migration can invalidate
+its node indices, tag-pair keys, and borrowed node observations.
+
+\subsection{Material and solver state}
+
+Home embeds \code{BurgInfo_t}, whose dynamically generated Burgers-vector,
+plane, indexing, and splinterability arrays are released individually during
+shutdown.  Optional anisotropic, spectral, ARKode, Eshelby-FMM, and related
+subsystems likewise have feature-specific cleanup.  New conditional storage
+should have symmetric initialization and release under the same preprocessor
+guard.
+
+\section{Allocation and release matrix}
+
+\small
+\begin{longtable}{@{}p{0.20\linewidth}p{0.20\linewidth}p{0.24\linewidth}p{0.28\linewidth}@{}}
+\toprule
+Storage & Allocator/creator & Storage owner & Release or reuse path \\
+\midrule
+\endhead
+\code{Home_t} & \code{calloc} in \code{InitHome()} & main simulation driver &
+\code{ReleaseMemory()} then \code{free(home)} \\
+\code{Param_t} & \code{calloc} during \code{Initialize()} & \code{Home_t} &
+free nested density array, then \code{free(param)} \\
+parser registries & \code{calloc}; \code{BindVar()} grows \code{varList} &
+\code{Home_t}, task zero & free \code{varList} and registry, never
+\code{valList} targets \\
+node-block header and slots & \code{malloc} header plus \code{calloc} slots in
+\code{PopFreeNodeQ()} & \code{home->nodeBlockQ} & manual per-slot arm/lock
+cleanup, then \code{free} slots and header \\
+runtime node arms & \code{AllocNodeArms()} / \code{ReallocNodeArms()} & owning
+\code{Node_t} slot & normally retained on \code{FreeNode()};
+\code{FreeNodeArms()} or shutdown \\
+native key array and recycled heap & \code{realloc}, heap helpers &
+\code{Home_t} & final cleanup; entries never own nodes \\
+ghost traversal array & \code{realloc} in \code{PushGhostNodeQ()} &
+\code{Home_t} & capacity retained across cycles, freed at shutdown \\
+\code{Cell_t} records & \code{calloc} in \code{AddCellToTable()} & cell hash
+table & \code{FreeCellTable()} \\
+cell dynamic arrays & cell/decomposition initialization & owning cell or Home
+epoch state & \code{DLBfreeOld()} as appropriate, final cell cleanup \\
+\code{RemoteDomain_t} and arrays & remote-domain initialization &
+\code{remoteDomainKeys} table & \code{DLBfreeOld()}; never free ghost nodes
+through key entries \\
+protocol buffers & per communication routine & allocating protocol or
+transferred consumer & after matching MPI completion and unpack/consume \\
+operation-list buffer & \code{InitOpList()}, grow on pack & \code{Home_t} &
+clear retains capacity; \code{FreeOpList()} releases \\
+segment list from C++ list API & \code{new Segment_t[]} & caller &
+\code{delete[]} after all segment pairs are done \\
+mirror domain arrays & mirror receive/unpack & task-zero mirror table &
+\code{MirrorDomain_Free()} and surrounding table cleanup \\
+\code{InData_t} staging arrays & restart/input readers & \code{InData_t} &
+\code{FreeInitArrays()}, then free container \\
+decomposition & type-specific allocators & \code{Home_t} & \code{FreeDecomp()} \\
+FMM layers/cells/coefficients & \code{FMInit()} and helpers & \code{Home_t} /
+nested FMM records & \code{FMFree()} \\
+subcycling state & \code{new Subcycling_t} & \code{Home_t} for one cycle &
+\code{delete} in \code{FinishSubcycling()} \\
+inclusion array & input, ghost, and migration paths using \code{realloc} &
+\code{Home_t} & final free; indices rebuilt after movement \\
+\bottomrule
+\end{longtable}
+\normalsize
+
+\section{Pointer and index invalidation rules}
+
+\begin{longtable}{@{}p{0.29\linewidth}p{0.29\linewidth}p{0.34\linewidth}@{}}
+\toprule
+Saved value & Invalidated by & Safe replacement \\
+\midrule
+\endhead
+\code{Node_t*} & node removal/recycle, ghost refresh, migration, mirror cleanup
+& save a tag only within a stable tag epoch and re-resolve; rebuild after
+migration \\
+pointer to \code{nodeKeys} entry/storage & key-array growth via
+\code{realloc}, DLB rebuild & re-read \code{home->nodeKeys} and bounds \\
+remote-node pointer or key-table entry & ghost recycle/replacement, DLB &
+resolve only during a valid ghost epoch \\
+arm-array pointer or arm index & insert/delete/reallocation of arms & locate
+the neighbor arm again by tag \\
+cell queue traversal state & sorting, movement, DLB, node deletion & restart
+from rebuilt cell queues \\
+\code{Segment_t*} or \code{SegmentPair_t*} & segment-list growth/destruction,
+topology, endpoint recycle & rebuild views and pairs \\
+\code{EInclusion_t*} & inclusion-array growth or compaction & store stable
+semantic ID where appropriate, then locate again; rebuild cell indices \\
+pointer into tag map, op list, or intersection list & any append that grows
+the backing array, clear/free & use copied value/offset only under the API's
+documented phase \\
+MPI send/receive buffer & completion cleanup or ownership transfer & do not
+access after the consumer frees it; never move/free before request completion \\
+subcycling cache/index & topology, tag changes, node-key capacity/layout
+changes & keep state inside the prescribed cycle and rebuild next cycle \\
+\bottomrule
+\end{longtable}
+
+\section{Memory API and diagnostics}
+
+Translation units including \srcfile{include/Home.h} replace C
+\code{malloc()}, \code{calloc()}, \code{realloc()}, and \code{free()} calls
+with \code{ParadisMalloc()}, \code{ParadisCalloc()},
+\code{ParadisRealloc()}, and \code{ParadisFree()}, including source location
+metadata.
+
+\lstinputlisting[style=cpp,firstline=130,lastline=149,firstnumber=130]{../include/Home.h}
+
+Without \code{DEBUG_MEM}, these wrappers delegate to the system allocator and
+fail fast on allocation errors.  With \code{DEBUG_MEM}, they track blocks and
+guard regions; the timestep driver calls \code{ParadisMemCheck()} at selected
+phase boundaries, and termination reports/cleans the tracking layer after
+\code{ParadisFinish()}.
+
+C++ \code{new}/\code{delete} do not pass through these macros.  Pair
+allocation families exactly:
+
+\begin{itemize}
+\item \code{malloc/calloc/realloc} with \code{free};
+\item \code{new T} with \code{delete};
+\item \code{new T[n]} with \code{delete[]};
+\item subsystem creators with their documented subsystem destructor.
+\end{itemize}
+
+\section{Current implementation sharp edges}
+
+The following are implementation observations, not recommended ownership
+patterns.  They matter when modifying nearby code.
+
+\begin{enumerate}
+\item \code{GetNewNativeNode()} resets only selected fields and does not
+release retained arm capacity.  Current topology callers explicitly clear
+arms and set native state.  Every new caller must fully initialize its slot.
+
+\item All free, ghost, and compatibility native queues share
+\code{Node_t::next}.  A node cannot be linked in two of them at once.
+\code{PushFreeNodeQ()} does not update \code{lastFreeNode} when pushing into
+an empty queue, while ghost-batch splicing relies on that tail; changes to pool
+transition ordering should audit this invariant.
+
+\item Primary remote-domain records are allocated with \code{malloc()} and
+only a subset of fields is initialized immediately.  Existing control flow
+uses count fields before pointer fields.  New users should not assume every
+pointer is null merely because the Home root was zeroed.
+
+\item Not every communication cleanup path nulls freed
+\code{RemoteDomain_t::inBuf/outBuf} fields or resets lengths.  The values are
+valid only inside the protocol's documented phase, even if a stale non-null
+bit pattern remains afterward.
+
+\item Normal final cleanup assumes transient \code{tagMap} and subcycling
+state have already been consumed and that mirror-table lifecycle completed.
+The persistent MPI request/status arrays allocated during remote-domain
+initialization are not visibly released by \code{ReleaseMemory()} in this
+revision.  Leak-clean early-exit work should audit these paths explicitly.
+
+\item \code{ReleaseMemory()} relies on manual lists of conditional fields.
+When adding a pointer to \code{Home_t}, \code{Param_t}, \code{Node_t},
+\code{Cell_t}, or an optional subsystem, add allocation, reset/invalidation,
+and normal plus early-exit cleanup together.
+\end{enumerate}
+
+\section{Extension checklist}
+
+Before adding or retaining a pointer, buffer, or index, answer all of the
+following:
+
+\begin{enumerate}
+\item Who owns the storage, and which exact function releases it?
+\item Is the pointer an object, an intrusive link, a lookup entry, or a
+phase-scoped borrowed view?
+\item Which event invalidates it: \code{realloc}, topology, node recycle,
+migration, ghost refresh, cell sort, DLB, or shutdown?
+\item Does the allocation use the C wrappers, scalar \code{new}, array
+\code{new[]}, or a subsystem allocator, and is the release family identical?
+\item If the field is in \code{Param_t}, how is it reconstructed after raw
+MPI broadcast?
+\item If it is an MPI buffer, who owns it before and after each nonblocking
+request, and in what units is its length stored?
+\item If it refers to a node or segment, can a copied \code{Tag_t} plus later
+resolution replace a long-lived raw pointer?
+\item If an array grows, are all interior pointers and saved indices either
+rebuilt or prohibited?
+\item Is initialization complete for a recycled/raw-allocated object rather
+than relying on a constructor or old zeroes?
+\item Are feature guards, locks, failure paths, DLB rebuild, and final cleanup
+symmetric?
+\end{enumerate}
+
+The safest steady-state node traversal is the sparse local key table:
+
+\begin{lstlisting}[style=cpp,numbers=none]
+for (int i = 0; i < home->newNodeKeyPtr; ++i) {
+    Node_t *node = home->nodeKeys[i];
+    if (node == NULL) continue;
+    /* Use node only within the current topology/migration/ghost epoch. */
+}
+\end{lstlisting}
+
+Across a potentially invalidating phase, discard the pointer and resolve
+again from a valid, remapped tag.  Across migration itself, rebuild the
+relation after tag maps have been distributed.
+
+\section{Summary of invariants}
+
+\begin{itemize}
+\item \code{Home_t} is the practical per-rank storage root, but nested
+subsystems still require specialized teardown.
+\item \code{nodeBlockQ}, not lookup tables or queues, owns production node
+objects.
+\item A node owns its active or retained arm allocations; logical deletion
+usually recycles rather than deallocates them.
+\item \code{nodeKeys}, ghost lists, remote key tables, cell queues, segment
+records, and segment pairs are views with narrower validity windows.
+\item Ghost memory is local even when logical ownership is remote.
+\item MPI operation authority and segment-computation ownership are unrelated
+to heap ownership.
+\item Cells persist, while decomposition-epoch lists and associations are
+cleared and rebuilt.
+\item Migration serializes values into independently owned destination
+storage, changes tags, repairs references, and invalidates prior relations.
+\item Raw allocation of class types bypasses constructors/destructors, so the
+manual allocator family and shutdown order are part of the correctness model.
+\end{itemize}
+
+\end{document}

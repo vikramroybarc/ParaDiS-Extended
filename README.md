@@ -76,6 +76,7 @@ A successful one-step run writes a restart containing five nodes: the three orig
 
 ## Detailed implementation guides
 
+- [Data structures and memory ownership (source)](docs/Data_Structures_and_Memory_Ownership.tex) documents the per-rank ownership tree, pooled nodes, arm arrays, segment views, cells, MPI ghosts and migration, allocation/free paths, and pointer invalidation rules.
 - [Control-file to simulation code guide (source)](docs/Control_File_to_ParaDiS_Simulation_code.tex) documents parameter registration, parsing, precedence, validation, MPI broadcast, restart headers, and first-cycle consumers.
 - [Topology and remeshing code guide (source)](docs/Topology_and_Remesh_code.tex) traces node splitting/merging, collision and MPI synchronization, mesh coarsening, and remesh rules 2 and 3.
 - [BCC binary junction node splitting (overview)](docs/BCC_Binary_Junction_Node_Splitting.tex) describes the binary-junction test case and its topology behavior.
@@ -88,6 +89,7 @@ A successful one-step run writes a restart containing five nodes: the three orig
 ### Documentation PDFs
 
 - [ParaDiS 4.0 User Guide](docs/ParaDiS_4.0_UserGuide.pdf)
+- [Data structures and memory ownership](docs/Data_Structures_and_Memory_Ownership.pdf)
 - [BCC binary junction node splitting](docs/BCC_Binary_Junction_Node_Splitting.pdf)
 - [BCC binary junction node splitting code guide](docs/BCC_Binary_Junction_Node_Splitting_code.pdf)
 - [Eshelby implementation](docs/Eshelby_Implementation.pdf)
