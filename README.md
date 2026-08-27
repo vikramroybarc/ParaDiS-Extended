@@ -74,6 +74,30 @@ mpirun -n 2 ../bin/paradis -doms 2 1 1 \
 
 A successful one-step run writes a restart containing five nodes: the three original pinned degree-one endpoints, one unconstrained degree-three node, and one degree-two node carrying constraint `16` (`CORNER_NODE`).
 
+## Detailed implementation guides
+
+- [Control-file to simulation code guide (source)](docs/Control_File_to_ParaDiS_Simulation_code.tex) documents parameter registration, parsing, precedence, validation, MPI broadcast, restart headers, and first-cycle consumers.
+- [Topology and remeshing code guide (source)](docs/Topology_and_Remesh_code.tex) traces node splitting/merging, collision and MPI synchronization, mesh coarsening, and remesh rules 2 and 3.
+- [BCC binary junction node splitting (overview)](docs/BCC_Binary_Junction_Node_Splitting.tex) describes the binary-junction test case and its topology behavior.
+- [BCC binary junction node splitting (source walkthrough)](docs/BCC_Binary_Junction_Node_Splitting_code.tex) provides the detailed code-level explanation for that test.
+- [Eshelby implementation notes (source)](docs/Eshelby_Implementation.tex) documents the Eshelby inclusion implementation.
+- [Eshelby/FMM implementation notes (source)](docs/eshelby_fmm_paradis.tex) explains the ParaDiS Eshelby and FMM integration.
+- [Nonlinear BCC mobility with Eshelby resistance](docs/MobilityLaw_BCC_nl_Eshelby_Resist.tex) documents the nonlinear BCC mobility law and resistance terms.
+- [Subcycling integrator notes](docs/SubcyclingIntegrator.md) records the subcycling integrator design and usage notes.
+
+### Documentation PDFs
+
+- [ParaDiS 4.0 User Guide](docs/ParaDiS_4.0_UserGuide.pdf)
+- [BCC binary junction node splitting](docs/BCC_Binary_Junction_Node_Splitting.pdf)
+- [BCC binary junction node splitting code guide](docs/BCC_Binary_Junction_Node_Splitting_code.pdf)
+- [Eshelby implementation](docs/Eshelby_Implementation.pdf)
+- [Eshelby/FMM notes](docs/Eshlby_FMM.pdf)
+- [Nonlinear BCC mobility with Eshelby resistance](docs/MobilityLaw_BCC_nl_Eshelby_Resist.pdf)
+
+### Documentation patch
+
+- [BCC nonlinear Eshelby segment-weighting patch](docs/BCC_nl_Eshelby_segment_weighting.patch)
+
 ## Base Code
 
 This repository is derived from **ParaDiS Public Release Version 4.0** developed at Lawrence Livermore National Laboratory.

@@ -1,0 +1,1188 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,mathtools,bm}
+\usepackage{booktabs,tabularx,array,longtable}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+
+\definecolor{codebg}{RGB}{247,247,247}
+\definecolor{codeframe}{RGB}{205,205,205}
+\definecolor{codecomment}{RGB}{0,105,75}
+\definecolor{codekeyword}{RGB}{25,65,145}
+
+\lstdefinestyle{base}{
+  basicstyle=\ttfamily\footnotesize,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  breaklines=true,
+  breakatwhitespace=false,
+  frame=single,
+  rulecolor=\color{codeframe},
+  backgroundcolor=\color{codebg},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=7pt,
+  xleftmargin=1.5em,
+  framexleftmargin=1em,
+  aboveskip=0.8em,
+  belowskip=0.8em
+}
+
+\lstdefinestyle{cpp}{
+  style=base,
+  language=C++,
+  keywordstyle=\color{codekeyword}\bfseries,
+  commentstyle=\color{codecomment},
+  stringstyle=\color{purple!65!black}
+}
+
+\lstdefinestyle{data}{
+  style=base,
+  language={}
+}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!55!black,
+  urlcolor=blue!65!black,
+  citecolor=blue!55!black,
+  pdftitle={Topology and Remeshing in ParaDiS},
+  pdfsubject={Line-by-line implementation guide}
+}
+
+\setlist{nosep,leftmargin=*}
+\setlist[description]{style=nextline,leftmargin=0pt,labelindent=0pt,
+                      labelwidth=0pt,labelsep=0pt,
+                      font=\normalfont\bfseries}
+\setcounter{tocdepth}{2}
+\allowdisplaybreaks
+\emergencystretch=2em
+\newcommand{\code}[1]{\texorpdfstring{\nolinkurl{#1}}{#1}}
+\newcommand{\srcfile}[1]{\texorpdfstring{\nolinkurl{#1}}{#1}}
+\newcommand{\vect}[1]{\bm{#1}}
+
+\title{Topology and Remeshing in ParaDiS\\
+       \large Execution Flow and Detailed Code Guide}
+\author{ParaDiS-Extended Development Notes}
+\date{August 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+ParaDiS evolves a graph of dislocation nodes and segments. Force integration
+moves the graph geometrically; topology code changes its connectivity; and
+remeshing changes its discretization while preserving the physical network.
+This guide follows those operations from the outer time-step driver through
+node splitting, node merging, collision handling, distributed-operation
+replay, mesh coarsening, and mesh refinement. It is written against the
+repository state at commit \code{cca5ff2}.
+
+The code excerpts are included directly from the source tree and retain their
+original line numbers. Each selected executable block is followed by a
+line-by-line explanation. Large, repetitive material-specific routines are
+described at their dispatch and mutation boundaries rather than copied five
+times. The source files remain authoritative when a future change moves a
+line or changes a condition.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Scope and reading convention}
+
+\subsection{What topology and remesh mean in ParaDiS}
+
+In this guide, \emph{topology} means an operation that changes the graph: an
+arm is moved, a node is created or removed, a segment endpoint is relinked,
+or a Burgers vector/glide plane is changed. These events arise from multi-node
+separation, collision/annihilation, cross slip, segment splintering,
+HCP-specific splitting, and, for free surfaces, surface operations.
+
+\emph{Remeshing} is the later, dedicated rediscretization pass. It removes an
+eligible degree-two node to coarsen a short or collapsing local shape, or
+inserts a degree-two node to refine a long or highly curved segment. It uses
+the same \code{SplitNode()} and \code{MergeNode()} primitives as topology
+events, but it has its own selection criteria and MPI synchronization pass.
+
+\subsection{How to read the listings}
+
+Each listing shows exact source line numbers, not document-local line
+numbers. One explanation item may cover a contiguous group of lines when the
+lines together implement one expression, declaration, loop, or preprocessor
+guard. Braces, blank lines, and comments are explained with their surrounding
+code rather than restated mechanically. This gives the reader a practical
+line-by-line guide without pretending that an isolated brace has independent
+behavior.
+
+\begin{longtable}{@{}p{0.40\linewidth}p{0.54\linewidth}@{}}
+\toprule
+File & Responsibility \\
+\midrule
+\endhead
+\srcfile{src/ParadisStep.cc} & Places topology and remesh in each accepted outer cycle. \\
+\srcfile{src/Topology.cc} & Shared mutation primitives, serial multi-node evaluation, ownership checks, duplicate-link cleanup. \\
+\srcfile{src/Remesh.cc} & Generic remesh dispatcher, force estimates, and common mesh coarsening. \\
+\srcfile{src/RemeshRule_2.cc} & Rule 2 refinement, which inserts at a segment midpoint. \\
+\srcfile{src/RemeshRule_3.cc} & Rule 3 refinement, which may place a degree-two refinement point on a fitted arc. \\
+\srcfile{src/CommSendRemesh.cc}\newline
+\srcfile{src/FixRemesh.cc}\newline
+\srcfile{src/RemoteOps.cc} & Pack, send, and replay graph mutations across MPI domains. \\
+\srcfile{src/SplitMultiNodesParallel.cc}\newline
+\srcfile{src/SMN*.cc} & Distributed force evaluation for parallel multi-node splitting. \\
+\bottomrule
+\end{longtable}
+
+\subsection{One-cycle mental model}
+
+\begin{center}
+\fbox{\parbox{0.92\linewidth}{
+Integrate positions and velocities \(\rightarrow\) initialise topology
+exemptions \(\rightarrow\) identify/split multi-nodes \(\rightarrow\)
+cross slip \(\rightarrow\) collision and special material events
+\(\rightarrow\) distribute/replay those changes \(\rightarrow\)
+remove duplicate links \(\rightarrow\) coarsen/refine the mesh
+\(\rightarrow\) distribute/replay remesh changes \(\rightarrow\)
+remove any orphan nodes.
+}}
+\end{center}
+
+The order is intentional. Topological physics events run first; remesh then
+cleans up the graph they leave behind. Two operation-list exchanges are normal
+in a parallel simulation: one after collision/topology work, and another
+after remeshing.
+
+\section{Data model, controls, and invariants}
+
+\subsection{Node state and topology flags}
+
+\lstinputlisting[style=cpp,firstline=24,lastline=205,firstnumber=24]{../include/Node.h}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[Lines 24--50] Constraints are bit flags. Pin bits identify fixed
+coordinates, \code{SURFACE_NODE} identifies a free-surface node, and
+\code{CORNER_NODE} marks a physical degree-two corner that remesh should not
+normally collapse. The topology implementation currently treats any pin bit
+as a fully pinned node; the warning at lines 30--35 is operational.
+\item[Lines 72--120] The macros make bitfield tests readable. For example,
+\code{HAS_ANY_OF_CONSTRAINTS(node->constraint, PINNED_NODE)} is the normal
+test for a node that cannot be deleted or freely repositioned.
+\item[Lines 123--131] These are transient per-cycle flags.
+\code{NO_COLLISIONS} prevents a node touched by one event from being reused
+by another collision in the same cycle. \code{NO_MESH_COARSEN} similarly
+prevents overlapping coarsening. \code{NODE_RESET_FORCES} says cached
+force/velocity values are not reliable enough for geometry-sensitive work.
+\item[Lines 141--153] A node owns position, total force, velocity, and
+history. The \code{old*} and \code{currv*} fields support integration and
+plastic-strain bookkeeping, so topology must preserve or deliberately update
+them.
+\item[Lines 158--171] \code{myTag} is the globally meaningful identity.
+\code{nbrTag} identifies adjacent nodes. Per-arm force, Burgers-vector, and
+glide-plane arrays are the segment data stored at this endpoint.
+\item[Lines 185--205] \code{constraint} is persistent state.
+\code{cellIdx}, \code{cell2Idx}, and \code{cell2QentIdx} connect a node to
+spatial acceleration structures. \code{native} distinguishes local ownership
+from a ghost replica.
+\end{description}
+
+\subsection{Public topology and remesh interfaces}
+
+\lstinputlisting[style=cpp,firstline=16,lastline=101,firstnumber=16]{../include/Topology.h}
+
+\lstinputlisting[style=cpp,firstline=20,lastline=74,firstnumber=20]{../include/Remesh.h}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[\srcfile{Topology.h}, lines 16--31] Merge statuses are bitwise. A caller
+must test \code{MERGE_SUCCESS} rather than compare the full result: success
+may coexist with \code{MERGE_NO_REPOSITION} or \code{MERGE_NODE_ORPHANED}.
+\item[\srcfile{Topology.h}, lines 36--55] \code{SplitNode()} returns a simple
+success/failure value. The operation classes identify separation, collision,
+and remesh invocations so common primitives can enforce suitable rules.
+\item[\srcfile{Topology.h}, lines 59--100] The header separates high-level
+selection routines such as \code{SplitMultiNodes()} from low-level mutation
+routines such as \code{SplitNode()} and \code{MergeNode()}. A new feature
+should normally select an event at the high level and use these primitives.
+\item[\srcfile{Remesh.h}, lines 20--24] A candidate event starts
+\code{REMESH_PENDING}; an executed event becomes \code{REMESH_COMMITTED};
+overlapping or invalid candidates become \code{REMESH_REJECTED}.
+\item[\srcfile{Remesh.h}, lines 30--59] Coarsen/refine records store
+\code{Tag_t}s instead of pointers because a prior event can delete or move a
+node. A refinement record also stores estimated force values for the two
+replacement segments. Rule 3 uses \code{haveNewPos} and \code{newPos} to
+carry its fitted-arc insertion point from selection to commit.
+\item[\srcfile{Remesh.h}, lines 64--72] \code{MeshCoarsen()} is shared by
+rules 2 and 3. The rule functions differ principally in \code{MeshRefine()}
+placement logic.
+\end{description}
+
+\subsection{Control-file parameters and derived thresholds}
+
+\lstinputlisting[style=cpp,firstline=227,lastline=261,firstnumber=227]{../include/Param.h}
+
+\lstinputlisting[style=cpp,firstline=579,lastline=627,firstnumber=579]{../src/Initialize.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[\srcfile{Param.h}, lines 227--243] \code{minSeg} and \code{maxSeg}
+bound target discretization. \code{rann} is the annihilation/contact distance
+and is reused by collisions, multi-node separation, and remesh safety guards.
+The internal geometric thresholds are \code{remeshAreaMin} and
+\code{remeshAreaMax}.
+\item[\srcfile{Param.h}, lines 244--261] \code{splitMultiNodeFreq} throttles
+multi-node work. \code{splitMultiNodeAlpha} supplies the noise penalty used
+when comparing trial split power. \code{split3node} enables the special BCC
+binary-junction case; the final controls select parallel evaluation and
+uniform versus calculated junction length.
+\item[\srcfile{Initialize.cc}, lines 579--602] If absent, position tolerance
+becomes one quarter of core radius and \code{rann} becomes twice the
+tolerance. These defaults propagate into topology distances.
+\item[\srcfile{Initialize.cc}, lines 604--620] Minimum area starts as
+\(2\,rTol\,maxSeg\), is tightened by the equilateral-triangle area implied by
+\code{minSeg} when provided, and then produces maximum area. The formulas
+make curvature criteria consistent with length and numerical tolerances.
+\item[\srcfile{Initialize.cc}, lines 622--627] When \code{minSeg} is absent,
+the code derives it from minimum area. A control file can therefore specify
+\code{maxSeg}/\code{rTol} and obtain a consistent lower length limit.
+\end{description}
+
+\begin{lstlisting}[style=data]
+# Typical controls; values must suit material, units, and cell size.
+maxSeg                    = 200.0
+minSeg                    = 50.0
+rann                      = 2.5
+remeshRule                = 2
+splitMultiNodeFreq        = 1
+splitMultiNodeAlpha       = 1.0e-3
+split3node                = 1
+useParallelSplitMultiNode = 0
+useUniformJunctionLen     = 0
+collisionMethod           = 2
+\end{lstlisting}
+
+\section{Where operations occur in one ParaDiS cycle}
+
+\lstinputlisting[style=cpp,firstline=380,lastline=493,firstnumber=380]{../src/ParadisStep.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[Lines 380--389] Output and the just-finished integration work occur
+before this excerpt. The first topology-specific action is
+\code{InitTopologyExemptions()}, which clears temporary exclusions and repairs
+stale corner marking.
+\item[Lines 391--395] \code{ClearOpList()} begins a fresh serialized change
+log. \code{SortNodesForCollision()} builds the fine \code{cell2} queues used
+to limit collision searches. It must happen before collision operations can
+delete nodes.
+\item[Lines 396--401] With \code{FIX_PLASTIC_STRAIN}, correction storage is
+reset before any operation changes swept area or a nodal position.
+\item[Lines 403--404] Exactly one multi-node implementation runs. The serial
+path evaluates trial splits locally; the parallel path distributes force
+contributions before committing local results.
+\item[Lines 406--414] Surface splitting is conditional on \code{_ARLFEM};
+\code{CrossSlip()} is a material dispatcher. Both can change planes and
+positions and participate in topology synchronization.
+\item[Lines 416--436] Collisions are handled after multi-node/cross-slip
+events. Segment splintering, HCP splitting, and optional particle collisions
+then append further mutations to the same operation list.
+\item[Lines 439--452] The first \code{CommSendRemesh()}/\code{FixRemesh()}
+pair broadcasts physics-driven topology changes and replays neighboring
+domains' changes locally.
+\item[Lines 454--482] Burgers conservation is checked after replay. A final
+duplicate-link pass is needed because separately valid remote changes can
+jointly make two links connect the same pair of nodes.
+\item[Lines 484--493] After topology is stable, \code{Remesh()} performs the
+independent coarsen/refine pass and owns a second clear/send/fix sequence.
+\end{description}
+
+\subsection{Collision-search preparation}
+
+\lstinputlisting[style=cpp,firstline=57,lastline=130,firstnumber=57]{../src/SortNodesForCollision.cc}
+
+\lstinputlisting[style=cpp,firstline=265,lastline=425,firstnumber=265]{../src/SortNodesForCollision.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[Lines 57--103] The first call computes a permanent fine-grid size.
+\code{maxSeparation = 1.1*maxSeg + rann} ensures candidates that could
+interact lie in the same or a neighboring \code{cell2}.
+\item[Lines 104--130] The code uses an integral number of fine cells per
+ordinary cell and caps it at 20 in each direction. It records the global
+number of body cells for later periodic-image mapping.
+\item[Lines 265--280] A head array represents queues; a compact second array
+represents queue entries. The latter has one potential entry per local node
+key.
+\item[Lines 282--343] Each node is folded to the image nearest the current
+domain centre, mapped to \code{cell2}, and clamped into the native range when
+needed. This keeps periodic images from creating unbounded search locations.
+\item[Lines 394--425] The node's starting \code{cell2Idx} is stored, then a
+critical section prepends it to its queue and stores the queue-entry index.
+A deleted node can later have its queue pointer cleared without breaking
+traversal of the remaining queue.
+\end{description}
+
+\section{The shared topology mutation layer}
+
+\subsection{Ownership is the primary parallel invariant}
+
+\lstinputlisting[style=cpp,firstline=8,lastline=34,firstnumber=8]{../src/Topology.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[Lines 8--15] The comments establish the reason for strict ownership:
+all domains can see ghosts, but only a deterministic owner may mutate a shared
+graph entity.
+\item[Lines 17--23] Owning a segment permits changing its endpoint tag,
+per-segment Burgers vector, force, and glide plane, and permits deletion.
+\item[Lines 25--29] Owning a node permits changing its local state, but
+deleting it is only allowed once all arms are gone. That prevents one domain
+from silently removing a node still referenced by another.
+\item[Lines 31--34] The implementation collects helpers that enforce these
+rules. Callers should not manually edit neighbor arrays.
+\end{description}
+
+\lstinputlisting[style=cpp,firstline=2208,lastline=2280,firstnumber=2208]{../src/Util.cc}
+
+\paragraph{Ownership schedule.}
+\begin{description}
+\item[Lines 2208--2251] \code{DomainOwnsSeg()} assigns local ownership
+immediately when both endpoints share the same domain.
+\item[Lines 2252--2267] For separation/collision across domains, the lower
+domain owns a segment on even cycles and the higher domain owns it on odd
+cycles.
+\item[Lines 2268--2273] Remesh intentionally uses the inverse cross-domain
+rule. Alternation distributes work and lets an ownership-blocked operation
+become eligible on a later cycle instead of making one rank permanently
+responsible.
+\item[Lines 2275--2280] Invalid operation classes are treated as programmer
+errors rather than being given an unsafe default owner.
+\end{description}
+
+\subsection{Per-cycle exemptions and temporary mobility}
+
+\lstinputlisting[style=cpp,firstline=327,lastline=498,firstnumber=327]{../src/Topology.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[Lines 327--368] The routine clears \code{NO_COLLISIONS} and
+\code{NO_MESH_COARSEN} on native and ghost nodes. It removes
+\code{CORNER_NODE} if a node is no longer degree two, preventing stale
+protection of a later unrelated configuration.
+\item[Lines 390--415] \code{EvaluateMobility()} zeroes an orphan's velocity
+instead of calling a mobility law that may require arms.
+\item[Lines 417--428] Mobility is not evaluated until every neighbor can be
+resolved locally. This protects material laws that examine neighbor data.
+\item[Lines 430--476] The selected mobility law is called, then glide-plane
+constraints and the optional shear-velocity cap are applied to the returned
+velocity.
+\item[Lines 488--498] An optional NaN/Inf check turns bad trial mobility into
+a source-local fatal error rather than allowing corrupt state to propagate.
+\end{description}
+
+\subsection{\code{SplitNode()}: one primitive for separation and refinement}
+
+\lstinputlisting[style=cpp,firstline=2465,lastline=2583,firstnumber=2465]{../src/Topology.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[Lines 2465--2487] The signature receives desired positions/velocities,
+arm indices to move, an operation class, and output pointers for the two
+post-split nodes. Outputs are first nulled so every failure is unambiguous.
+\item[Lines 2489--2497] Only a native node may be split by this domain.
+Moving zero arms is a fatal programming error because it would create an
+invalid empty node.
+\item[Lines 2499--2510] A one-arm split normally bisects a segment during
+remesh. The source arm's glide plane is saved so both child segments inherit
+it instead of receiving a newly guessed plane.
+\item[Lines 2512--2530] Arm removal renumbers the array. The temporary arm
+list is sorted in descending order, guaranteeing that deleting a later index
+never invalidates an earlier index still to be processed.
+\item[Lines 2532--2541] The operation is permitted only if this domain owns
+each selected segment. Endpoint relinking is a segment mutation.
+\item[Lines 2543--2583] If requested arms are not all owned, the routine tries
+the complementary partition. \code{switchedArms} preserves logical
+\code{splitNode1}/\code{splitNode2} semantics; if neither partition is
+locally owned, the split fails without graph mutation.
+\end{description}
+
+\lstinputlisting[style=cpp,firstline=2585,lastline=2712,firstnumber=2585]{../src/Topology.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[Lines 2585--2603] \code{GetNewNativeNode()} obtains a reusable record.
+Existing arm arrays are freed because this primitive requires a zero-arm
+starting state. The new node becomes native, unconstrained, and has zero old
+velocity.
+\item[Lines 2605--2617] In a free-surface build, the optional flag duplicates
+surface constraint/normal data. Ordinary bulk remesh does not use this branch.
+\item[Lines 2619--2647] The routine maps the original/new records to
+\code{splitNode1}/\code{splitNode2} according to whether it complemented the
+selected arm set. It writes caller-chosen positions and velocities and copies
+old position to the new node.
+\item[Lines 2653--2684] A pinned original remains on the \code{pos1} side;
+surface properties similarly remain there unless explicitly duplicated. This
+prevents a generic split from accidentally freeing an anchored endpoint.
+\item[Lines 2686--2712] A global operation serializes a
+\code{REM_OP_SPLIT_NODE} record plus a coordinate reset for the original
+node. The reset is needed because a caller may have moved that node.
+\end{description}
+
+\lstinputlisting[style=cpp,firstline=2714,lastline=2860,firstnumber=2714]{../src/Topology.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[Lines 2714--2746] For every selected arm, the code gets the neighbor,
+saves endpoint force, subtracts old contribution, relinks the neighbor to the
+new node, inserts the matching new arm, removes the old arm, and restores
+force. Helper calls keep both endpoints and the operation log consistent.
+\item[Lines 2748--2756] The temporary arm list is released and the new node
+is assigned to a spatial cell before later force work can find it.
+\item[Lines 2758--2778] The routine sums Burgers vectors attached to the new
+side. Unless both nodes are surface nodes, a nonzero sum requires a connecting
+segment for Burgers conservation.
+\item[Lines 2780--2799] The long comment explains a pinned-node corner case.
+The nonzero Burgers-sum test is the usual condition for adding the link.
+\item[Lines 2801--2848] A refinement split copies the original plane. General
+separation computes a plane from line direction and Burgers vector, uses
+velocity as a fallback, then chooses an allowed screw plane if undefined.
+\item[Lines 2850--2860] Opposite Burgers vectors are inserted at the two
+endpoints of the connecting segment. The routine leaves its force to the
+caller, which knows whether a saved or estimated force is appropriate.
+\end{description}
+
+\subsection{\code{MergeNode()}: common coarsen and collision primitive}
+
+\lstinputlisting[style=cpp,firstline=2879,lastline=2929,firstnumber=2879]{../src/Topology.cc}
+
+\lstinputlisting[style=cpp,firstline=2976,lastline=3117,firstnumber=2976]{../src/Topology.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[Lines 2879--2929] \code{MergeNodePreCondition()} is a fast version of
+the deletion eligibility test. It returns which supplied endpoint, if either,
+is a legal node to delete.
+\item[Lines 2976--2995] \code{MergeNode()} starts pessimistically: it returns
+no merged node and \code{MERGE_NOT_PERMITTED} until a legal deletion target
+is found.
+\item[Lines 2996--3024] \code{node1Deletable} requires local ownership, no
+pin, compatible surface condition, no per-cycle collision/coarsen exemption,
+and local ownership of every incident segment.
+\item[Lines 3027--3057] If node 1 cannot be deleted, the same test is applied
+to node 2. At most one legal choice is needed; if neither is deletable,
+nothing is changed.
+\item[Lines 3059--3117] A prospective double link is checked before mutation.
+If cleanup of that double link would be owned remotely, the merge is rejected.
+Never create a graph state that the current domain cannot repair.
+\end{description}
+
+\lstinputlisting[style=cpp,firstline=3119,lastline=3268,firstnumber=3119]{../src/Topology.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[Lines 3119--3135] The chosen survivor is returned and marked
+successful. If it is local and position-compatible, it is moved to the
+requested merge position.
+\item[Lines 3136--3151] With plastic-strain correction enabled, collision or
+remesh merging accounts for swept area from both nodes before coordinates
+change.
+\item[Lines 3154--3186] The target coordinate is written and, for global
+events, logged for remote replay. If constrained or remote, the merge still
+proceeds but reports \code{MERGE_NO_REPOSITION}.
+\item[Lines 3188--3229] Any direct target/dead link is deleted first. Each
+remaining dead-node arm is transferred: the neighbor is relinked, the dead
+endpoint arm is deleted, the survivor receives the same Burgers vector/plane,
+and its force is restored.
+\item[Lines 3231--3241] All dead-node constraints are inherited by the
+survivor, then the now-arm-free dead node is removed.
+\item[Lines 3243--3268] Duplicate links are combined or annihilated. If that
+leaves an orphan, a local orphan is deleted immediately and a remote orphan
+is reported for later cleanup.
+\end{description}
+
+\subsection{Duplicate links and orphan nodes}
+
+\lstinputlisting[style=cpp,firstline=91,lastline=109,firstnumber=91]{../src/Topology.cc}
+
+\lstinputlisting[style=cpp,firstline=523,lastline=708,firstnumber=523]{../src/Topology.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[Lines 91--109] \code{RemoveOrphanedNodes()} scans local node keys and
+deletes a node with zero arms. It deliberately does not message other
+domains; the subsequent ghost exchange publishes the corrected list.
+\item[Lines 523--572] \code{RemoveDoubleLinks()} finds repeated neighbor tags
+on one local node. It records relevant arm data before deleting or combining
+them.
+\item[Lines 573--593] If the Burgers vectors cancel, both duplicate arms are
+removed. This is topological annihilation of redundant opposite segments.
+\item[Lines 603--695] If they do not cancel, the vectors are combined and a
+valid glide plane is retained or recalculated. The routine updates forces and
+the remote-operation stream as requested.
+\item[Lines 696--708] A resulting local orphan is deleted. The return status
+lets callers record that an operation made an orphan, even when it is remote.
+\end{description}
+
+\section{Topology-event selection}
+
+\subsection{Serial multi-node splitting}
+
+\lstinputlisting[style=cpp,firstline=1354,lastline=1510,firstnumber=1354]{../src/Topology.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[Lines 1354--1382] The routine declares candidate partitions, backups,
+force records, mobility arguments, and the best power-release candidate.
+\item[Lines 1385--1400] The frequency guard lets diagnostics remain active
+while skipping costly tests on other cycles. Initial desired separation is
+\(2rann+\epsilon\); \code{vNoise} penalizes candidates whose apparent
+advantage is within time-step/mobility noise.
+\item[Lines 1424--1461] Native nodes with at least four arms are candidates.
+A three-arm node is admitted only when \code{split3node} is enabled for BCC
+and \code{BCC_binary_junction_node()} identifies a non-planar binary junction.
+\item[Lines 1463--1510] Surface and pinned nodes are excluded. A short arm
+also excludes the candidate because splitting near an already tiny segment can
+create high-velocity numerical debris.
+\end{description}
+
+\lstinputlisting[style=cpp,firstline=1512,lastline=1642,firstnumber=1512]{../src/Topology.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[Lines 1512--1525] The original node and every neighbor are deep-copied.
+Trial candidates temporarily mutate real data, so restore must recover arrays
+as well as scalar node fields.
+\item[Lines 1528--1536] Original \(f\mathbin{\cdot}v\) power is the baseline.
+A split is attractive only if post-split motion releases more power.
+\item[Lines 1539--1568] \code{SMNGetArmSets()} enumerates unique nontrivial
+partitions. Position/velocity arrays remember the best trial, while
+\code{armList} is built in descending arm-index order.
+\item[Lines 1569--1609] Each partition is applied with \code{globalOp=0};
+the zero-length trial link is local and temporary. Selected arms attach to
+\code{splitNode2}. For BCC degree-three work, the binary-junction arm cannot
+be put in the selected subset.
+\item[Lines 1611--1642] Existing segment forces are copied from backups,
+avoiding a full force calculation at the zero-length trial. The two temporary
+nodes then receive mobility evaluation, with inclusion support when enabled.
+\end{description}
+
+\lstinputlisting[style=cpp,firstline=1644,lastline=2001,firstnumber=1644]{../src/Topology.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[Lines 1644--1665] A successful mobility evaluation is adjusted for new
+junction force/velocity. The initially zero-length connecting segment becomes
+important once nodes separate.
+\item[Lines 1667--1687] The BCC degree-three case freezes its resulting
+degree-two corner during trial scoring. Squared speeds identify which node or
+nodes should move.
+\item[Lines 1688--1791] If post-split velocities separate endpoints, the
+faster side determines a trial direction. Equal-and-opposite motion moves
+both nodes half the initial distance; otherwise one moves the full distance.
+\code{FoldBox()} maintains periodic coordinates.
+\item[Lines 1800--1888] Forces are recalculated after geometry changes. The
+new nonzero connector receives a valid glide plane before the second mobility
+call. Relative velocity is then saved for the power test.
+\item[Lines 1905--1920] Mobility failure terminates candidate evaluation for
+this node. A candidate is physically separating only when relative velocity
+has a positive component along selected separation direction.
+\item[Lines 1922--2001] Trial power is the sum of post-split
+\(f\mathbin{\cdot}v\) terms minus force-scaled noise. Only a strict
+improvement becomes best. Its segment forces/positions are saved; a four-arm
+split that would immediately collide is marked for rejection.
+\end{description}
+
+\lstinputlisting[style=cpp,firstline=2003,lastline=2396,firstnumber=2003]{../src/Topology.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[Lines 2003--2067] Every temporary split is merged back locally and the
+original node/neighbors are restored from deep backups. This is a true
+rollback, so original arm indices remain valid across trials.
+\item[Lines 2079--2097] A candidate is discarded if predicted immediate
+collision would undo the new configuration.
+\item[Lines 2099--2217] The winning partition is rebuilt in descending order.
+Its saved direction determines final positions. The code either uses uniform
+separation or calls \code{CalcJunctionLen()} for a line-tension-based length.
+\item[Lines 2219--2269] Final global \code{SplitNode()} creates graph
+mutation. A degree-two node from the BCC three-arm path receives
+\code{CORNER_NODE}, and its constraint reset is appended to the MPI log.
+\item[Lines 2271--2345] Plastic strain is corrected when enabled. Saved
+forces are restored to the winning configuration and pushed to every
+affected endpoint with \code{ResetSegForces2()}.
+\item[Lines 2349--2396] The two participants become collision-exempt for the
+rest of the cycle. Candidate and backup arrays are then freed.
+\end{description}
+
+\subsection{BCC binary-junction classifier}
+
+\lstinputlisting[style=cpp,firstline=1231,lastline=1333,firstnumber=1231]{../src/Topology.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[Lines 1231--1264] The classifier returns an arm index or \(-1\). It
+requires exactly three arms, initializes a candidate junction direction, and
+uses a five-degree geometric tolerance.
+\item[Lines 1266--1308] Each nonzero-length arm direction is calculated in
+the nearest periodic image. An arm with Burgers magnitude above one is treated
+as the junction arm; the other two supply edge/glide-plane normals.
+\item[Lines 1311--1329] A valid binary junction has one junction arm and two
+glissile arms. Cross products of parent normals decide whether the junction
+line is planar. Planar cases are excluded by the caller; the extension splits
+the non-planar case and preserves its physical corner.
+\item[Lines 1332--1333] The junction arm index lets the caller reject
+partitions that would move it to the degree-two side.
+\end{description}
+
+\subsection{Parallel multi-node splitting}
+
+\lstinputlisting[style=cpp,firstline=15,lastline=123,firstnumber=15]{../src/SplitMultiNodesParallel.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[Lines 17--34] The same cadence policy applies before allocating
+parallel-work data.
+\item[Lines 36--53] The domain builds ghost and native multi-node lists. It
+evaluates partial forces for every candidate partition because remote
+contributions are needed to score local candidates accurately.
+\item[Lines 55--71] Ghost-candidate force data is packed for owning domains.
+The code determines which domains should send contributions for native
+candidates, then exchanges buffers.
+\item[Lines 73--99] All transient communication buffers are freed before the
+final decision stage because their contents have been accumulated into native
+multi-node records.
+\item[Lines 101--106] \code{SMNEvalMultiNodeSplits()} now has complete forces
+for local candidates and commits only locally owned winners. The later generic
+operation exchange propagates resulting graph changes.
+\item[Lines 108--123] Candidate storage is released and the shared timer
+stops.
+\end{description}
+
+The records in \srcfile{include/SMN.h}, lines 43--71 retain the number of
+arms and per-arm endpoint forces for each trial. Parallel mode changes where
+forces are evaluated, not the physical acceptance criterion or the
+\code{SplitNode()} graph operation.
+
+\subsection{Cross slip and collision dispatch}
+
+\lstinputlisting[style=cpp,firstline=636,lastline=656,firstnumber=636]{../src/CrossSlip.cc}
+
+\lstinputlisting[style=cpp,firstline=942,lastline=954,firstnumber=942]{../src/Collision.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[\srcfile{CrossSlip.cc}, lines 636--640] The dispatcher reads run-time
+enable state, material type, and BCC model selector.
+\item[\srcfile{CrossSlip.cc}, lines 642--654] When enabled, exactly one
+material-specific routine runs. These routines can reset glide planes and
+reposition nodes; they use the current topology operation list.
+\item[\srcfile{Collision.cc}, lines 942--951] \code{collisionMethod} selects
+predictive-LG (4), retroactive (3), predictive (2), or proximity (1/default)
+search/response logic. The default parameter value is 2.
+\item[\srcfile{Collision.cc}, lines 953--954] The dispatcher has no geometry;
+it isolates policy selection from callers.
+\end{description}
+
+\lstinputlisting[style=cpp,firstline=776,lastline=1040,firstnumber=776]{../src/PredictiveCollision.cc}
+
+\paragraph{Line-by-line explanation of predictive-collision selection.}
+\begin{description}
+\item[Lines 776--828] The implementation declares four endpoints, positions,
+velocities, candidate split/merge records, and \code{rann^2} threshold.
+\item[Lines 830--887] Eligible native nodes visit their own and neighboring
+\code{cell2} queues. \code{NO_COLLISIONS}, absent membership, and stable
+\code{CollisionNodeOrder()} eliminate invalid or duplicate work.
+\item[Lines 889--958] Nested arm loops form segment pairs. Current domain
+must own both segments before it can change endpoints. Shared-hinge and
+remote-owned candidates are skipped.
+\item[Lines 960--1004] Four endpoints are mapped into consistent periodic
+images and zero-length segments are rejected before distance mathematics.
+\item[Lines 1006--1028] \code{GetMinDist()} calculates closest approach,
+approach rate, and fractional positions. Intersections closer than one
+Burgers-vector unit are treated as current collisions.
+\item[Lines 1029--1040] Nearby nonintersecting segments enter predictive
+time/point calculation. The remainder refines affected segments when needed,
+then calls \code{MergeNode()} at a permitted point, updates forces, and marks
+participants exempt. It uses the same split/merge primitives, not a separate
+graph-edit system.
+\end{description}
+
+\section{MPI topology synchronization}
+
+\subsection{Operation-log protocol}
+
+\lstinputlisting[style=cpp,firstline=14,lastline=103,firstnumber=14]{../include/OpList.h}
+
+\lstinputlisting[style=cpp,firstline=45,lastline=114,firstnumber=45]{../src/RemoteOps.cc}
+
+\lstinputlisting[style=cpp,firstline=670,lastline=708,firstnumber=670]{../src/RemoteOps.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[\srcfile{OpList.h}, lines 14--28] \code{OpType_t} enumerates every
+serialized mutation: connection changes, arm insertion/deletion through
+Burgers change, node split/removal, coordinate/force/plane/constraint reset.
+All ranks must run a binary with matching record layouts.
+\item[\srcfile{OpList.h}, lines 30--103] Each record begins with
+\code{opType}, followed by tags and scalar/vector payload to replay exactly
+one mutation. Tags, rather than pointers, make a byte stream meaningful on a
+different rank.
+\item[\srcfile{RemoteOps.cc}, lines 45--51] Clearing an operation list zeroes
+used bytes and resets used length. It is called once before physics topology
+work and again before remesh.
+\item[\srcfile{RemoteOps.cc}, lines 90--114] The list begins as a 4096-byte
+buffer and grows in fixed increments. Producers need not predict count.
+\item[\srcfile{RemoteOps.cc}, lines 670--708] A split producer enters an
+OpenMP critical section, ensures capacity, fills the fixed record (old tag,
+new tag, coordinates, velocity), copies it to the byte buffer, and advances
+\code{opListUsedLen}. Other \code{AddOp*()} helpers use this append pattern.
+\end{description}
+
+\subsection{Sending the log}
+
+\lstinputlisting[style=cpp,firstline=21,lastline=136,firstnumber=21]{../src/CommSendRemesh.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[Lines 23--32] The routine finds remote neighbor count and current byte
+length of the local operation log.
+\item[Lines 33--43] In a parallel build, nonblocking receives for every
+neighbor's message length are posted first. This avoids send/send deadlock.
+\item[Lines 45--70] MPI cannot safely use one buffer for multiple
+nonblocking sends. The code retains the original for one receiver and clones
+it for every other remote domain.
+\item[Lines 72--100] Message lengths are exchanged and incoming byte buffers
+are allocated before full record streams are received.
+\item[Lines 102--117] Actual streams are sent/received asynchronously; all
+requests complete before return.
+\item[Lines 119--135] Temporary outgoing clones are released. The primary
+\code{home->opListBuf} remains owned by \code{Home_t}; serial builds make the
+network part a no-op.
+\end{description}
+
+\subsection{Replaying neighbouring operations}
+
+\lstinputlisting[style=cpp,firstline=25,lastline=157,firstnumber=25]{../src/FixRemesh.cc}
+
+\lstinputlisting[style=cpp,firstline=158,lastline=313,firstnumber=158]{../src/FixRemesh.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[Lines 25--55] For every remote domain, \code{FixRemesh()} reads its
+received buffer from offset zero until the advertised length is consumed. The
+first integer chooses a record format.
+\item[Lines 57--90] Connection-change and insert-arm records are copied from
+the stream, the offset advances by \code{sizeof(record)}, and corresponding
+local endpoints are changed with \code{globalOp=0}. Replay must not append a
+new operation recursively.
+\item[Lines 92--157] A split record creates a ghost node at the specified
+tag, coordinates, and velocity, frees stale arms, and assigns a spatial cell.
+Later records add arms/connections. Producer ordering therefore matters:
+split precedes records that refer to its new tag.
+\item[Lines 158--212] Force-obsolete and force-reset records preserve force
+consistency. They are not cosmetic; later geometric selection may refuse a
+segment when forces are stale.
+\item[Lines 214--247] Coordinate and constraint records change persistent
+state. Constraint replay is how \code{CORNER_NODE} survives domain boundaries.
+\item[Lines 249--299] Node removal, Burgers/arm changes, and glide-plane reset
+records invoke the same low-level helpers used for local work, with logging
+disabled.
+\item[Lines 301--313] An unknown opcode is fatal because safe byte-offset
+recovery is impossible. Once a domain's stream is replayed its buffer is
+released.
+\end{description}
+
+\section{Remeshing}
+
+\subsection{Dispatcher and postconditions}
+
+\lstinputlisting[style=cpp,firstline=1172,lastline=1272,firstnumber=1172]{../src/Remesh.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[Lines 1174--1181] A negative \code{remeshRule} disables this pass.
+Otherwise the dispatcher obtains parameters and may synchronize timer
+measurement at the start.
+\item[Lines 1190--1204] It starts the remesh timer, clears a fresh operation
+log, resets per-cycle exemptions, and dispatches rule 2 or rule 3. Any other
+nonnegative rule is fatal rather than silently selecting an algorithm.
+\item[Lines 1207--1217] Free-surface builds remove a segment that joins two
+nodes on the same surface.
+\item[Lines 1219--1231] The second operation-log exchange propagates all
+remesh splits/merges and replays remote changes.
+\item[Lines 1233--1245] Independent remote changes may create a duplicate
+link. Every local node is checked after replay.
+\item[Lines 1247--1252] Orphaned nodes are removed before the next ghost-node
+exchange. This is the final graph-cleanliness postcondition.
+\item[Lines 1254--1271] Optional timing/memory checks close the pass.
+\end{description}
+
+\subsection{Force estimates used during topology changes}
+
+\lstinputlisting[style=cpp,firstline=132,lastline=167,firstnumber=132]{../src/Remesh.cc}
+
+\lstinputlisting[style=cpp,firstline=187,lastline=290,firstnumber=187]{../src/Remesh.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[Lines 132--167] \code{EstRefinementForces()} finds the existing arm
+indices, copies Burgers data and endpoint arm forces, represents node 2 in the
+same periodic image as node 1, then calls \code{FindSubFSeg()} to estimate
+four endpoint forces on the two child segments.
+\item[Lines 187--224] \code{EstCoarsenForces()} finds both old arm IDs and
+makes all three nodes periodic-image consistent. It copies Burgers and force
+data needed for a combined future segment.
+\item[Lines 225--290] Very short/zero arms are treated specially because
+\code{FindFSegComb()} is not stable for them. Otherwise it estimates endpoint
+forces for the one segment that replaces two old segments.
+\end{description}
+
+These are estimates, not a substitute for full force calculation. Later
+cleanup calls \code{MarkNodeForceObsolete()} so accurate forces are calculated
+at the next appropriate force-update point.
+
+\subsection{Mesh coarsening: selecting a removal}
+
+\lstinputlisting[style=cpp,firstline=378,lastline=419,firstnumber=378]{../src/Remesh.cc}
+
+\lstinputlisting[style=cpp,firstline=460,lastline=758,firstnumber=460]{../src/Remesh.cc}
+
+\paragraph{Line-by-line explanation of candidate selection.}
+\begin{description}
+\item[Lines 378--419] \code{MeshCoarsen()} derives local/remote maximum-length
+cutoffs, squared area threshold, and allocates candidate storage. The list
+allows the initial geometry scan to be parallel while graph changes are
+serialized safely.
+\item[Lines 460--495] A candidate must be degree two, unpinned, not already
+exempt, have two resolvable neighbors, and own at least one incident segment.
+\item[Lines 497--528] The two arms and future neighbor-to-neighbor chord are
+computed in minimum-image coordinates as \(r_1,r_2,r_3\).
+\item[Lines 530--543] \code{CORNER_NODE} protects a physical junction corner.
+It can be removed only across a sufficiently short attached segment, avoiding
+loss of a real kink merely because it is degree two.
+\item[Lines 545--651] When glide planes are enforced, the arms normally must
+share a plane. Exceptions allow debris cleanup for tiny segments, small
+triangles, fuzzy/close planes, and matching nearest precise planes.
+\item[Lines 653--668] The future direct segment cannot exceed \code{maxSeg}.
+With a remote neighbor, the stricter half-cell cutoff prevents two independent
+domain changes creating a segment spanning too many cells.
+\item[Lines 671--715] Heron's formula gives \code{area2}, which is actually
+\(A^2\), not twice the area. Its time derivative determines shrinking. A
+candidate is listed when \(A^2<A_{\min}^2\) and shrinking, or either arm is
+shorter than \code{minSeg}.
+\item[Lines 717--758] Unsafe remote-ownership cases are rejected. Accepted
+candidates are appended under a critical section as \code{REMESH_PENDING}.
+\end{description}
+
+\subsection{Mesh coarsening: committing nonoverlapping removals}
+
+\lstinputlisting[style=cpp,firstline=764,lastline=1051,firstnumber=764]{../src/Remesh.cc}
+
+\lstinputlisting[style=cpp,firstline=1053,lastline=1160,firstnumber=1053]{../src/Remesh.cc}
+
+\paragraph{Line-by-line explanation of commit and repair.}
+\begin{description}
+\item[Lines 764--816] Candidates are revisited in parallel, but
+\code{ProceedWithCoarsen()} runs in a critical section. It prevents two
+events sharing a node or neighbor from both committing.
+\item[Lines 818--838] Current nodes are resolved from saved tags because
+earlier events can delete one. Missing data safely cancels the event.
+\item[Lines 840--885] Corner-protected endpoints may only merge over a link
+no longer than \(2rann\). The code tests both potential target neighbors.
+\item[Lines 887--918] Segment forces are estimated before mutation. An event
+is global if either neighbor, or any arm connected to either neighbor, reaches
+another domain.
+\item[Lines 926--983] Actual mutation is in a critical section. Code first
+attempts \code{MergeNode(node,nbr1)} at \code{nbr1}'s location, then tries
+the other neighbor if the first merge is illegal.
+\item[Lines 985--1051] Surviving endpoints are resolved again, estimated
+forces are installed on the new segment, and the result becomes
+coarsen-exempt during this pass.
+\item[Lines 1053--1139] A stable-topology pass marks endpoint and neighbor
+forces obsolete. When fuzzy planes are enabled, new segment plane is
+recalculated.
+\item[Lines 1141--1160] Optional diagnostics reduce counts across ranks,
+then temporary candidate storage is freed.
+\end{description}
+
+\subsection{Rule 2 refinement: midpoint insertion}
+
+\lstinputlisting[style=cpp,firstline=35,lastline=65,firstnumber=35]{../src/RemeshRule_2.cc}
+
+\lstinputlisting[style=cpp,firstline=95,lastline=420,firstnumber=95]{../src/RemeshRule_2.cc}
+
+\paragraph{Line-by-line explanation of selection.}
+\begin{description}
+\item[Lines 35--65] The function derives squared maximum length/area
+thresholds and allocates a refine list. The leading source comment calls this
+version 3, but dispatcher lines in \srcfile{Remesh.cc} show that the file
+implements rule 2; this is a source-comment typo.
+\item[Lines 95--104] Pinned nodes are never used as degree-two refinement
+anchors.
+\item[Lines 106--179] A degree-two node uses its two arm lengths and local
+triangle geometry. Rule 2 area derivative includes all endpoint velocities.
+\item[Lines 181--217] Each arm starts eligible, then is rejected if forces at
+both endpoints are stale or this domain does not own the segment.
+\item[Lines 219--318] A segment is selected if it exceeds \code{maxSeg}, or
+if it is sufficiently curved: it is not too short to bisect, local area
+exceeds \code{remeshAreaMax}, and local area is not shrinking. Duplicate
+checks ensure only one list entry represents the physical segment.
+\item[Lines 320--420] Nodes whose degree is not two use a simpler rule: the
+stable lower tag endpoint considers each owned arm once and lists it only when
+its squared length exceeds \code{maxSeg^2}.
+\end{description}
+
+\lstinputlisting[style=cpp,firstline=426,lastline=661,firstnumber=426]{../src/RemeshRule_2.cc}
+
+\paragraph{Line-by-line explanation of Rule 2 commit.}
+\begin{description}
+\item[Lines 426--479] Saved endpoint tags are resolved and both nodes lock.
+Stored segment vector puts the point at the midpoint; endpoint velocities are
+averaged; replacement-segment forces are estimated before arm arrays change.
+\item[Lines 481--526] Insertion point is folded into the periodic box. A split
+is global only across domains. Under a critical section,
+\code{SplitNode()} moves exactly one arm from node 1 to a new node, replacing
+\(n_1--n_2\) with \(n_1--n_{new}--n_2\).
+\item[Lines 528--548] Locks are released. A successful entry saves new tag
+and four estimated endpoint-force vectors.
+\item[Lines 551--618] Each committed event marks three nodes force-stale,
+installs estimates on the two new segments, and reevaluates mobility under
+the relevant node lock.
+\item[Lines 642--661] Optional logging prints transformation and list storage
+is released.
+\end{description}
+
+\subsection{Rule 3 refinement: fitted-arc insertion}
+
+\lstinputlisting[style=cpp,firstline=123,lastline=377,firstnumber=123]{../src/RemeshRule_3.cc}
+
+\paragraph{Line-by-line explanation of Rule 3 geometry.}
+\begin{description}
+\item[Lines 123--190] Rule 3 starts with the same degree-two triangle, but
+computes area rate using only the central node velocity. Treating neighbors as
+stationary prevents choosing an arc direction merely because neighbors move
+away while the central node moves toward them.
+\item[Lines 192--231] Ownership and stale-force guards are unchanged from
+rule 2.
+\item[Lines 233--267] Two segment midplanes and normal
+\(\vect{v}_1\times\vect{v}_2\) define three equations for the circumcentre of
+the local three-node arc.
+\item[Lines 269--313] Rule 3 uses the same basic length/area decision as rule
+2 before spending work on fitted geometry.
+\item[Lines 315--323] For sufficiently large area, the \(3\times3\) matrix is
+inverted to calculate the circle centre. An inversion failure is fatal; the
+source intentionally does not fall back to a midpoint in this branch.
+\item[Lines 325--339] The radius and radial direction through the selected
+chord midpoint are calculated.
+\item[Lines 341--356] The segment glide-plane normal is calculated as
+\(\vect{b}\times\vect{l}\). A screw segment has zero normal, which is handled
+without division by zero.
+\item[Lines 358--377] Midpoint is moved onto the circumcircle, then its
+normal-to-glide-plane displacement is removed. The final \code{newPos}
+preserves local curvature while respecting the plane. Below curvature
+threshold, ordinary midpoint insertion is retained.
+\end{description}
+
+\lstinputlisting[style=cpp,firstline=419,lastline=434,firstnumber=419]{../src/RemeshRule_3.cc}
+
+\lstinputlisting[style=cpp,firstline=560,lastline=785,firstnumber=560]{../src/RemeshRule_3.cc}
+
+\paragraph{Line-by-line explanation of Rule 3 commit.}
+\begin{description}
+\item[Lines 419--434] The computed arc position is stored with
+\code{haveNewPos=1}. The record also retains the original segment vector for
+force estimation and fallback processing.
+\item[Lines 560--606] At commit, \code{haveNewPos} selects stored arc point or
+midpoint. Velocity interpolation and force estimation remain as in rule 2.
+\item[Lines 608--673] Global-operation decision, one-arm \code{SplitNode()}
+call, locking, and committed-record update match Rule 2 semantics.
+\item[Lines 676--785] Final force-obsolete, estimated-force, and mobility
+updates also match. The rules differ primarily in candidate geometry and
+insertion position, not graph mutation or MPI behavior.
+\end{description}
+
+\subsection{Rule comparison}
+
+\begin{center}
+\begin{tabularx}{0.96\linewidth}{@{}lXX@{}}
+\toprule
+Rule & Selection trigger & Insertion placement \\
+\midrule
+2 & Long segment or a nonshrinking high-area degree-two triangle & Midpoint of selected segment. \\
+3 & Same basic trigger, with extra degree-two curved-geometry work & Fitted circumcircle/arc point projected to glide plane; midpoint fallback. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Both rules call \code{MeshCoarsen()} first, then refine. Both use the same
+operation records, locks, force estimates, MPI replay, duplicate-link cleanup,
+and orphan removal.
+
+\section{End-to-end transactions}
+
+\subsection{Example: a long degree-two segment}
+
+\begin{enumerate}
+\item \code{ParadisStep()} reaches \code{Remesh()} only after the
+physics-driven topology exchange completes.
+\item \code{Remesh()} clears operation log, resets exemptions, and calls
+\code{RemeshRule_2()} or \code{RemeshRule_3()}.
+\item \code{MeshRefine()} recognizes an owned segment whose length exceeds
+\code{maxSeg}. Rule 2 chooses a midpoint; rule 3 may choose an arc point for
+a curved degree-two configuration.
+\item It locks endpoints, estimates forces for two replacements, then calls
+\code{SplitNode(OPCLASS_REMESH,...)} with one selected arm.
+\item \code{SplitNode()} creates a native node, relinks old neighbor, inserts
+the required connecting arm, and appends operations if the segment crosses
+domains.
+\item Refinement installs estimates and marks nodes for accurate future force
+calculation. \code{CommSendRemesh()} and \code{FixRemesh()} make remote ghost
+topology match; cleanup removes duplicates and orphans.
+\end{enumerate}
+
+\subsection{Example: a short, collapsing degree-two node}
+
+\begin{enumerate}
+\item \code{MeshCoarsen()} verifies degree two, unpinned status, ownership,
+glide-plane compatibility, maximum future length, and corner protections.
+\item A shrinking small triangle or an arm shorter than \code{minSeg} adds a
+candidate. Overlap control chooses a nonoverlapping subset.
+\item The code estimates future direct-segment force and calls
+\code{MergeNode(OPCLASS_REMESH,...)} at an allowed neighbor position.
+\item \code{MergeNode()} chooses legally deletable endpoint, transfers arms
+to survivor, inherits constraints, and invokes duplicate-link cleanup.
+\item The new segment receives estimated forces; exact forces are marked
+obsolete. The second MPI exchange propagates deletion and relinking.
+\end{enumerate}
+
+\subsection{Example: a multi-node separation}
+
+\begin{enumerate}
+\item The serial path enumerates arm partitions and makes each a temporary
+zero-length \code{SplitNode()} transaction. Parallel path calculates the same
+candidate force data across contributing domains.
+\item Mobility, junction force, separation direction, and
+\(f\mathbin{\cdot}v\) power select the best admissible partition.
+\item Every trial is rolled back. Only winning split runs with
+\code{globalOp=1}, writes operation records, installs saved forces, and marks
+participants collision-exempt.
+\item Collision handling then runs and replays full log remotely. A later
+remesh pass can refine a new junction segment but does not normally coarsen a
+protected BCC physical corner.
+\end{enumerate}
+
+\section{Validation, limitations, and developer checklist}
+
+\subsection{Initialization checks that protect remesh}
+
+\lstinputlisting[style=cpp,firstline=690,lastline=739,firstnumber=690]{../src/Initialize.cc}
+
+\paragraph{Line-by-line explanation.}
+\begin{description}
+\item[Lines 692--702] \code{minSeg} must be less than half \code{maxSeg}, and
+\code{maxSeg} must exceed \code{minSeg}. This assures that one bisection can
+produce acceptable child lengths.
+\item[Lines 704--709] \code{maxSeg} must remain under 90 percent of the
+smallest cell width, preserving force/cell spatial assumptions.
+\item[Lines 711--715] Derived area thresholds must remain mutually
+consistent; bad geometry tuning is stopped before stepping.
+\item[Lines 717--739] Nonfatal warnings expose poor core radius, area, and
+contact-distance choices that can destabilize topology decisions.
+\end{description}
+
+\subsection{Implementation details to keep in mind}
+
+\begin{itemize}
+\item In \srcfile{RemeshRule_2.cc}:227 and
+\srcfile{RemeshRule_3.cc}:274, \code{segLen} is declared \code{int} but is
+assigned a real-valued arm length before comparisons. Consequently the
+degree-two length comparisons truncate fractional length. This guide records
+current behavior; maintainers may wish to audit whether \code{real8} was
+intended.
+\item Candidate arrays are initially sized at twice
+\code{home->newNodeKeyPtr}. If full, append code skips later candidates rather
+than reallocating. That is safe but can defer legitimate remesh work.
+\item Rule 3 treats a circumcentre-matrix inversion failure as fatal. This
+avoids silently inserting at invalid position, but it makes nearly degenerate
+curved cases worth testing.
+\item Cross slip is in topology phase because it changes segment planes and
+positions, but it normally preserves node/segment cardinality. Do not describe
+all cross-slip events as node creation or deletion.
+\end{itemize}
+
+\subsection{Invariants for topology modifications}
+
+\begin{itemize}
+\item \textbf{Ownership:} mutate a segment only when \code{DomainOwnsSeg()}
+grants operation-class ownership; mutate/delete a node only through legal
+primitive checks.
+\item \textbf{Burgers conservation:} \code{SplitNode()} creates a connector
+from moving-side Burgers sum. Outer driver calls
+\code{CheckBurgConservation()} after topology replay.
+\item \textbf{Both endpoints agree:} never edit one node's \code{nbrTag},
+Burgers, plane, or force array by hand. Use connection/arm helpers.
+\item \textbf{No overlaps:} candidate detection may be parallel; commits must
+lock/serialize shared nodes and maintain
+\code{REMESH_COMMITTED}/\code{REMESH_REJECTED}.
+\item \textbf{Force validity:} respect \code{NODE_RESET_FORCES}, preserve
+estimates, and mark affected neighborhoods obsolete after mutation.
+\item \textbf{Periodic geometry:} calculate vectors with \code{ZImage()} or
+\code{PBCPOSITION()}, and fold stored coordinates with \code{FoldBox()}.
+\item \textbf{Distributed replay:} every remote-visible change needs an
+\code{AddOp*()} record. Replay it with \code{globalOp=0}.
+\item \textbf{Postconditions:} clean duplicate links after remote replay and
+remove local orphan nodes before ghost communication.
+\end{itemize}
+
+\subsection{Useful breakpoints and logging}
+
+{\small
+\begin{longtable}{@{}p{0.38\linewidth}p{0.56\linewidth}@{}}
+\toprule
+Location or symbol & What it reveals \\
+\midrule
+\endhead
+\code{src/ParadisStep.cc:403,419,447,493} & High-level phase order for one cycle. \\
+\code{src/Topology.cc:2465} \code{SplitNode()} & Every arm-moving insertion, including remesh. \\
+\code{src/Topology.cc:2976} \code{MergeNode()} & Every coarsen/collision deletion decision. \\
+\code{src/Remesh.cc:714} and \code{src/RemeshRule_2.cc:254} & Geometry predicates that nominate coarsen/refine candidates. \\
+\code{src/RemoteOps.cc:670} and \code{src/FixRemesh.cc:92} & A split record being produced and replayed. \\
+\code{DEBUG_TOPOLOGY_CHANGES} & Prints separation, coarsen, refine, and collision operations. \\
+\code{DEBUG_LOG_MESH_COARSEN}, \code{DEBUG_LOG_MESH_REFINE} & Reduces and prints event counts across ranks. \\
+\end{longtable}
+}
+
+\subsection{Checklist for a new topology event}
+
+\begin{enumerate}
+\item Decide whether event moves arms, merges nodes, changes a segment
+property, or needs a new primitive. Reuse \code{SplitNode()} and
+\code{MergeNode()} whenever semantics fit.
+\item Define deterministic ownership, including a safe response when a
+candidate spans domains.
+\item Screen candidates using force validity, constraints, periodic geometry,
+and per-cycle exemptions.
+\item Make trial operations local/reversible; make final operation global only
+when remote state can observe it.
+\item Record every remote-visible change through an \code{AddOp*()} operation,
+or add record type, producer, and \code{FixRemesh()} case together.
+\item Restore/recompute per-arm forces and mobility; mark untrusted data
+obsolete.
+\item Exercise serial, OpenMP, and MPI cases. Verify Burgers conservation,
+duplicate-link cleanup, and restart/ghost consistency.
+\end{enumerate}
+
+{\footnotesize\noindent\textit{Primary sources: the Section~1 code files;
+\code{docs/ParaDiS_4.0_UserGuide.pdf}; and
+\code{docs/BCC_Binary_Junction_Node_Splitting_code.tex}.}\par}
+
+\end{document}

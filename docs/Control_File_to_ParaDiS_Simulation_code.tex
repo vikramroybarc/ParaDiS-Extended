@@ -1,0 +1,247 @@
+\documentclass[11pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=0.85in]{geometry}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,booktabs,tabularx,longtable,array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+\definecolor{codebg}{RGB}{247,248,250}
+\definecolor{codegray}{RGB}{95,99,104}
+\lstdefinestyle{base}{basicstyle=\ttfamily\footnotesize,columns=fullflexible,keepspaces=true,showstringspaces=false,breaklines=true,breakatwhitespace=false,frame=single,rulecolor=\color{codegray},backgroundcolor=\color{codebg},numbers=left,numberstyle=\tiny\color{codegray},numbersep=7pt,xleftmargin=1.5em,framexleftmargin=1em,aboveskip=0.7em,belowskip=0.7em}
+\lstdefinestyle{cpp}{style=base,language=C++}
+\lstdefinestyle{ctrl}{style=base,language={},morecomment=[l]{\#}}
+\hypersetup{colorlinks=true,linkcolor=blue!50!black,urlcolor=blue!50!black,pdftitle={Control Files to a ParaDiS Simulation}}
+\setlist{nosep,leftmargin=*}
+\setcounter{tocdepth}{2}
+\emergencystretch=2em
+\newcommand{\code}[1]{\texorpdfstring{\nolinkurl{#1}}{#1}}
+\newcommand{\srcfile}[1]{\texorpdfstring{\nolinkurl{#1}}{#1}}
+\title{Control Files to a ParaDiS Simulation\\\large Source-level parsing, validation, and runtime propagation}
+\author{ParaDiS development notes}
+\date{August 2026}
+\begin{document}
+\maketitle
+\begin{abstract}
+This guide follows one control-file value from text on disk to the code that consumes it during a ParaDiS run. It identifies the files involved, reproduces the relevant source with repository line numbers, and explains each line or small group of lines. The emphasis is on the actual implementation in this repository: the control-file grammar, the \code{Param_t} storage object, command-line precedence, rank-0 parsing, MPI propagation, data/restart headers, derived defaults, and the first-cycle consumers.
+\end{abstract}
+\tableofcontents
+\newpage
+
+\section{Executive view}
+The complete path is:
+\begin{verbatim}
+argv / control.script
+        |  ParaDiS.cc -> ParadisInit.cc -> Initialize.cc
+        v
+CtrlParamInit: names, types, destinations, defaults
+        |
+ReadControlFile -> GetNextToken -> LookupParam -> GetParamVals
+        |
+command-line overrides -> InputSanity -> material/table setup
+        |
+MPI_Bcast(Param_t) to every rank
+        |
+nodal data/restart header -> geometry and node state
+        |
+SetRemainingDefaults + SetMaterialTypeFromMobility
+        |
+ParadisStep: forces, integrator, topology, remeshing, output
+\end{verbatim}
+Only the registered entries in \code{CtrlParamInit()} are legal run-control keys. A field in \code{Param_t} is not automatically readable merely because it exists in the structure.
+
+\section{Files and responsibilities}
+\begin{longtable}{p{0.29\linewidth}p{0.64\linewidth}}
+\toprule
+\textbf{File} & \textbf{Responsibility}\\
+\midrule
+\srcfile{src/ParaDiS.cc} & Process entry point; calls initialization and runs the cycle loop.\\
+\srcfile{src/ParadisInit.cc}, \srcfile{src/InitHome.cc} & Allocate the \code{Home_t} object, initialize MPI/rank information, then call \code{Initialize}.\\
+\srcfile{src/Initialize.cc} & Select input files, allocate parameter lists, parse the control file, apply CLI precedence, validate, broadcast, read nodal data, and derive runtime values.\\
+\srcfile{src/Param.cc} & Registers control and data names with \code{BindVar}; assigns defaults.\\
+\srcfile{src/Parse.cc}, \srcfile{include/Parse.h} & Tokenizer, lookup, type conversion, list parsing, aliases, and restart-file writing.\\
+\srcfile{src/ReadRestart.cc} & Reads the text control file and text nodal-data/restart headers.\\
+\srcfile{src/ReadBinaryRestart.cc} & Reads the binary restart/data representation.\\
+\srcfile{src/InputSanity.cc} & Cross-field validation and legal-value normalization.\\
+\srcfile{include/Param.h}, \srcfile{include/Typedefs.h}, \srcfile{include/Home.h} & Define storage, registry metadata, and the pointer through which simulation code accesses parameters.\\
+\srcfile{src/ElasticConstants.cc}, mobility files & Consume filenames and material controls after parsing.\\
+\srcfile{src/ParadisStep.cc}, \srcfile{src/Topology.cc}, \srcfile{src/Remesh.cc}, \srcfile{src/CrossSlip.cc} & First-cycle consumers of the propagated values.\\
+\bottomrule
+\end{longtable}
+
+\section{What counts as input?}
+ParaDiS has four related but distinct input surfaces:
+\begin{enumerate}
+\item The run control file (normally \code{control.script}; a positional argument or \code{-f} can select another file).
+\item Command-line switches such as \code{-maxstep}, \code{-doms}, \code{-cells}, \code{-dir}, and \code{-r}. These are applied after the text file and therefore have higher precedence.
+\item A nodal data or restart file. Its header is parsed by the separate \code{DataParamList}; it is not another control file.
+\item External tables named by control strings, for example \code{ecFile}, \code{meltTempFile}, \code{MobFileNL}, and correction-table filenames.
+\end{enumerate}
+
+For example, \srcfile{tests/bcc_binary_junction_node.ctrl} contains scalar assignments, quoted strings, and bracketed vectors. Representative lines are shown below (the source file itself is the authoritative test fixture):
+\begin{verbatim}
+dirname = "./data"
+numXdoms = 1
+maxstep = 100
+mobilityLaw = "BCC_0"
+appliedStress = [ 0 0 0 0 0 0 ]
+edotdir = [ 1 0 0 ]
+\end{verbatim}
+The parser treats \code{appliedStress = [ ... ]} as six values and \code{edotdir = [ ... ]} as three values; the registration determines the required count.
+
+\section{Storage: how a name reaches \code{Param_t}}
+\subsection{Registry metadata}
+\lstinputlisting[style=cpp,firstline=97,lastline=113,firstnumber=97]{../include/Typedefs.h}
+\begin{description}
+\item[97--101] The registry stores a variable name and the address of its destination. The address is a \code{void*} because values may be integer, double, or character data.
+\item[102--107] \code{valType} says how tokens are converted; \code{valCnt} is the scalar/vector cardinality; \code{flags} records alias, disabled, and user-set state.
+\item[108--113] \code{ParamList_t} is a growable array of these records. There is no map or copied value: parsing writes directly through \code{valList} into \code{Param_t}.
+\end{description}
+
+\lstinputlisting[style=cpp,firstline=260,lastline=295,firstnumber=260]{../include/Home.h}
+The important lines are the \code{Param_t *param} member and the two root-only lists. Rank zero owns the names and pointers; all ranks receive the plain parameter bytes later.
+
+The token and value constants are defined here:
+\lstinputlisting[style=cpp,firstline=14,lastline=49,firstnumber=14]{../include/Parse.h}
+\code{TOKEN_ERR}, \code{TOKEN_NULL}, \code{TOKEN_GENERIC}, and the bracket/equal tokens describe the grammar. \code{V_DBL}, \code{V_INT}, and \code{V_STRING} select conversion. \code{VFLAG_SET_BY_USER} is set only after a key is actually read.
+
+\section{Program entry and input-file selection}
+\subsection{Main loop}
+\lstinputlisting[style=cpp,firstline=166,lastline=187,firstnumber=166]{../src/ParaDiS.cc}
+Lines 166--167 call initialization. Lines 169--172 copy the start cycle and compute \code{cycleEnd = cycleStart + maxstep}; this is the first direct use of a parsed control value. Lines 179--187 establish the initial time/cycle state.
+\lstinputlisting[style=cpp,firstline=245,lastline=280,firstnumber=245]{../src/ParaDiS.cc}
+The loop repeatedly calls \code{ParadisStep}; the time-end test uses the initialized \code{timeNow} and \code{timeEnd}. Thus a control value can affect both the number of loop iterations and the termination condition.
+
+\subsection{MPI and the initialization call chain}
+\lstinputlisting[style=cpp,firstline=247,lastline=369,firstnumber=247]{../src/ParadisInit.cc}
+Lines 255--258 create/initialize \code{Home_t}. Lines 294--300 query MPI rank and size; the serial branch (303--315) supplies rank zero and one process. Lines 342--346 call \code{Initialize}, and lines 364--369 print the resulting setup summary. \code{Initialize} is therefore the boundary where textual input becomes simulation state.
+
+\section{Initialization: defaults, CLI, and the control file}
+\lstinputlisting[style=cpp,firstline=1498,lastline=1548,firstnumber=1498]{../src/Initialize.cc}
+Lines 1498--1503 enter initialization. Lines 1505--1540 set local command-line variables to safe sentinels. Non-root ranks allocate only \code{Param_t} (1542--1544); they do not parse text.
+\lstinputlisting[style=cpp,firstline=1578,lastline=1770,firstnumber=1578]{../src/Initialize.cc}
+Lines 1583--1585 choose \code{control.script}. The argument loop (1586--1678) recognizes switches and treats the final non-option argument as the control filename. Lines 1690--1740 derive the data filename, including automatic \code{.hdf}, \code{.hdf.0}, and \code{.data} probing. Lines 1757--1768 allocate both registries and \code{Param_t}, then call \code{CtrlParamInit} and \code{DataParamInit}; this is where defaults are installed before file text is read.
+\lstinputlisting[style=cpp,firstline=1789,lastline=1841,firstnumber=1789]{../src/Initialize.cc}
+Lines 1789--1793 call \code{ReadControlFile}. Lines 1795--1837 apply CLI values afterward, so \code{-maxstep}, \code{-doms}, \code{-cells}, \code{-dir}, \code{-gpu}, \code{-r}, and \code{-s} override a control-file assignment. Lines 1839--1841 call \code{InputSanity}; all cross-field checks happen before MPI propagation.
+
+\section{Building the schema: \code{CtrlParamInit}}
+\lstinputlisting[style=cpp,firstline=94,lastline=201,firstnumber=94]{../src/Param.cc}
+Lines 96--100 clear the list. Each \code{BindVar} call supplies: the external spelling, destination address, value type, expected count, and flags. The following assignments are defaults. For example, lines 106--108 bind \code{numXdoms} to \code{param->nXdoms} and default it to one; lines 139--145 register \code{maxstep} and \code{timestepIntegrator}; lines 191--201 register topology/remesh controls such as \code{remeshRule}, \code{splitMultiNodeFreq}, and \code{splitMultiNodeAlpha}.
+\lstinputlisting[style=cpp,firstline=274,lastline=314,firstnumber=274]{../src/Param.cc}
+Lines 278 and 281 register six-component \code{appliedStress} and three-component \code{edotdir}. Lines 300--301 register the nine-component rotation matrix. Lines 312--314 set material/mobility string defaults. These counts are later enforced by \code{GetParamVals}.
+\lstinputlisting[style=cpp,firstline=560,lastline=599,firstnumber=560]{../src/Param.cc}
+The I/O group binds \code{dirname}, binary-restart and output controls, and defaults \code{numIOGroups} to one. This is also why changing a field in \code{Param.h} without adding a \code{BindVar} does not make a new keyword legal.
+\lstinputlisting[style=cpp,firstline=725,lastline=742,firstnumber=725]{../src/Param.cc}
+\code{DataParamInit} registers only the restart/data-header keys. Keeping this list separate prevents a nodal-data header from being interpreted as a run-control assignment.
+
+\subsection{The binding operation}
+\lstinputlisting[style=cpp,firstline=58,lastline=80,firstnumber=58]{../src/Parse.cc}
+Line 63 saves the old array and line 64 records its size. Line 65 increments the count; line 67 reallocates. Lines 69--70 clear and copy the name. Lines 72--75 store the destination pointer, type, count, and flags. Line 77 publishes the enlarged array. Every later parse operation depends on this direct pointer binding.
+
+\section{Lexing and parsing, line by line}
+\subsection{ReadControlFile}
+\lstinputlisting[style=cpp,firstline=52,lastline=118,firstnumber=52]{../src/ReadRestart.cc}
+Lines 54--61 create the file, token buffer, parser state, and maximum token length. Lines 63--66 open the one requested file and call \code{Fatal} on failure. The loop begins at line 68. Lines 73--88 fetch a key, stop cleanly at end-of-file, and reject lexical errors. Lines 94--100 perform case-insensitive lookup; an unknown key is reported, then its values are consumed with a null destination so old/new control files remain forward-compatible. Lines 102--105 retrieve the registered type/count/address and mark the entry as user-set. Lines 108--112 convert the value(s), aborting on malformed syntax or wrong cardinality. Line 115 closes the file. Assignments are sequential, so a later occurrence overwrites an earlier one (as demonstrated by the repeated \code{maxstep} in \code{tests/bcc_0b.ctrl}).
+
+\subsection{Tokenization}
+\lstinputlisting[style=cpp,firstline=483,lastline=676,firstnumber=483]{../src/Parse.cc}
+The tokenizer skips whitespace and \code{\#} comments (532--543), recognizes quoted strings (552--581), and emits punctuation tokens for \code{=}, \code{[}, and \code{]} (590--626). Quotes may not cross a newline (632--635), end-of-file is explicit (646--650), and the token buffer is bounded at 256 bytes (664--669). This explains why filenames with spaces must be quoted and why comments are allowed only outside a quoted string.
+
+\subsection{Lookup and conversion}
+\lstinputlisting[style=cpp,firstline=386,lastline=429,firstnumber=386]{../src/Parse.cc}
+\code{LookupParam} compares names with \code{StrEquiv} (399--403), so spelling is case-insensitive. Alias records (414--422) resolve to the same destination pointer. The result is an index or \code{-1}; the caller decides whether that means “unknown” or a fatal error.
+\lstinputlisting[style=cpp,firstline=239,lastline=367,firstnumber=239]{../src/Parse.cc}
+Line 251 requires \code{=}. Lines 262--264 read one or more values. Lines 270--275 enter bracket-list mode. Lines 282--311 reject missing tokens, nested lists, and a closing bracket with the wrong count. Lines 324--357 convert doubles with \code{atof}, integers with \code{atoi}, and strings with \code{strcpy}; line 335 enforces the registered cardinality. A null destination still consumes tokens, which is the mechanism used for unknown names. Because \code{atoi}/\code{atof} are permissive, semantic range and relationship checks belong to \code{InputSanity}.
+
+\section{Precedence and MPI propagation}
+The effective precedence is:
+\begin{enumerate}
+\item C/C++ zero values; then \code{CtrlParamInit} defaults.
+\item Control-file assignments through \code{ReadControlFile}.
+\item Explicit CLI overrides in \code{Initialize}.
+\item \code{InputSanity} normalization and derived values.
+\item Root-only material/table reads.
+\item Raw broadcast of \code{Param_t}.
+\item Nodal-data metadata and post-read derived defaults.
+\end{enumerate}
+\lstinputlisting[style=cpp,firstline=1909,lastline=1911,firstnumber=1909]{../src/Initialize.cc}
+The three lines broadcast exactly \code{sizeof(Param_t)} bytes as characters. Registry arrays are not broadcast: they contain process-local pointers. Function pointers are resolved later by \code{SetMaterialTypeFromMobility}, so raw byte broadcast does not copy invalid function addresses between processes.
+\lstinputlisting[style=cpp,firstline=1971,lastline=2005,firstnumber=1971]{../src/Initialize.cc}
+Lines 1971--1975 select text or binary nodal-data reading. Lines 1983--1989 replace stale metadata with current control values; lines 1994--1996 establish cell lengths. Line 2004 maps the mobility name to executable mobility functions.
+
+\section{Validation and derived values}
+\lstinputlisting[style=cpp,firstline=22,lastline=170,firstnumber=22]{../src/InputSanity.cc}
+The early lines validate domain counts, MPI geometry, I/O-group counts, FMM cell/layer settings, and decomposition. Importantly, checks combine fields: a syntactically valid value can still be rejected or clamped when it conflicts with another parameter.
+\lstinputlisting[style=cpp,firstline=227,lastline=237,firstnumber=227]{../src/InputSanity.cc}
+Load type is checked and split frequency is clamped to a legal positive value; boolean topology flags are normalized. The same function contains specialized checks for trapezoid integration, subcycling, KINSOL, anisotropic elasticity, and HCP constraints.
+\lstinputlisting[style=cpp,firstline=392,lastline=503,firstnumber=392]{../src/Initialize.cc}
+Lines 392--399 obtain the parameter object. Lines 403--415 scan the mobility table and copy the selected law's enum and function pointers. Lines 421--445 enforce glide-plane capabilities; lines 454--475 infer material type and Burgers-group count; lines 477--500 reject incompatible or unknown mobility names.
+\lstinputlisting[style=cpp,firstline=544,lastline=715,firstnumber=544]{../src/Initialize.cc}
+\code{SetRemainingDefaults} runs after nodal data. It derives cell lengths, cutoff and segment limits, tolerances, subcycling values, core energy, periodic bounds, density storage, and volume. Sentinel values such as a negative \code{maxSeg} are therefore intentionally resolved here, not in the text parser.
+
+\section{The nodal data/restart boundary}
+\lstinputlisting[style=cpp,firstline=466,lastline=655,firstnumber=466]{../src/ReadRestart.cc}
+\code{ReadNodeDataFile} opens the data file, reads its header, and loops over the separate data registry. \code{domainDecomposition} is special: its min/max coordinates can be converted into legacy decomposition bounds. The \code{nodalData} marker ends the header; node records follow. Binary restart reading performs the analogous job in \srcfile{src/ReadBinaryRestart.cc}. This path supplies node state and file geometry; it does not replace the control-file registry.
+
+\section{From \code{Param_t} to the first simulation cycle}
+\subsection{Cycle count and integrator}
+\lstinputlisting[style=cpp,firstline=320,lastline=352,firstnumber=320]{../src/ParadisStep.cc}
+The step routine computes forces/velocities and dispatches on \code{timestepIntegrator}. A string such as \code{trapezoid} therefore changes the integrator branch, while the main loop's \code{maxstep} controls how many times this routine is entered.
+\lstinputlisting[style=cpp,firstline=784,lastline=823,firstnumber=784]{../src/TrapezoidIntegrator.cc}
+The trapezoid integrator copies \code{deltaTT} into a trial step, bounds it by \code{maxDT}, and uses \code{trapezoidMaxIterations}. Later code (904--1000) accepts/rejects the trial using \code{rTol} and \code{maxSeg}, then adjusts the next step with \code{dtDecrementFact}, \code{dtIncrementFact}, \code{dtExponent}, and \code{dtVariableAdjustment}.
+
+\subsection{Topology, remeshing, and cross slip}
+\lstinputlisting[style=cpp,firstline=379,lastline=493,firstnumber=379]{../src/ParadisStep.cc}
+This region gates topology work, parallel remeshing, cross slip, and the final remesh call.\
+\lstinputlisting[style=cpp,firstline=1385,lastline=1399,firstnumber=1385]{../src/Topology.cc}
+\code{splitMultiNodeFreq} determines how often multi-node splitting is attempted; \code{rann}, \code{minSeg}, \code{splitMultiNodeAlpha}, \code{rTol}, and \code{deltaTT} determine the geometric and tolerance tests.
+\lstinputlisting[style=cpp,firstline=1172,lastline=1204,firstnumber=1172]{../src/Remesh.cc}
+Negative \code{remeshRule} disables remeshing. Rules 2 and 3 select the corresponding remesh algorithms.\
+\lstinputlisting[style=cpp,firstline=636,lastline=656,firstnumber=636]{../src/CrossSlip.cc}
+Cross slip is enabled only when the control flag, material, and BCC index agree. These consumers read the same \code{Param_t} populated earlier; no second control-file parse occurs.
+
+\section{A concrete value trace}
+\begin{longtable}{p{0.23\linewidth}p{0.24\linewidth}p{0.43\linewidth}}
+\toprule
+\textbf{Control text} & \textbf{Binding/default} & \textbf{Later effect}\\
+\midrule
+\code{maxstep = 100} & \code{Param.cc} binds \code{param->maxstep}; default is 100. & \code{ParaDiS.cc} computes \code{cycleEnd}; CLI \code{-maxstep} can replace it.\\
+\code{timestepIntegrator = "trapezoid"} & String destination, default trapezoid. & \code{ParadisStep.cc} dispatches to trapezoid integration.\\
+\code{appliedStress = [ six values ]} & \code{V_DBL}, count 6. & Force calculation and mobility see the six-component stress tensor.\\
+\code{mobilityLaw = "BCC_0"} & String destination, default BCC\_0. & Mobility table lookup installs material-specific function pointers after broadcast.\\
+\code{remeshRule = 2} & Integer destination, default 2. & \code{Remesh.cc} selects rule-2 remeshing; negative disables it.\\
+\bottomrule
+\end{longtable}
+
+\section{Restart persistence and debugging}
+\lstinputlisting[style=cpp,firstline=56,lastline=80,firstnumber=56]{../src/WriteRestart.cc}
+\code{WriteCtrl} writes a restart control file by setting the current cycle and calling \code{WriteParam}.\
+\lstinputlisting[style=cpp,firstline=100,lastline=203,firstnumber=100]{../src/Parse.cc}
+\code{WriteParam} skips aliases, suppresses disabled fields unless they were user-set, and prints scalars/vectors according to the same type/count metadata used by the reader. This makes a written control file an auditable snapshot of effective values.
+
+Useful debugger breakpoints are: \code{Initialize.cc:1789} (before parse), \code{ReadRestart.cc:94} (lookup), \code{Parse.cc:324} (conversion), \code{Initialize.cc:1839} (validation), \code{Initialize.cc:1909} (broadcast), \code{Initialize.cc:2004} (mobility mapping), and \code{ParadisStep.cc:320} (first consumer).
+
+\section{Adding a new control parameter}
+\begin{enumerate}
+\item Add storage to \code{Param_t} only if the value is genuinely runtime state.
+\item Add one \code{BindVar} call in \code{CtrlParamInit} with the exact spelling, destination, type, count, flags, and default.
+\item Add cross-field/range checks to \code{InputSanity} and sentinel derivation to \code{SetRemainingDefaults} when needed.
+\item Consume the field after the MPI broadcast; resolve process-local function pointers after the broadcast.
+\item Add a representative control-file test and verify both text and restart output through \code{WriteParam}.
+\end{enumerate}
+
+\section{Implementation caveats}
+\begin{itemize}
+\item The parser is intentionally small: there is no include directive or recursive file expansion in \code{ReadControlFile}; it opens one file.
+\item Unknown keys are tolerated, but unknown multi-value assignments should use brackets so the parser knows where the list ends.
+\item Numeric lexical validation is weak because conversion uses \code{atoi}/\code{atof}; rely on \code{InputSanity} for semantic correctness.
+\item Registry pointers are valid only within a process. Never broadcast \code{ParamList_t}; broadcast the plain \code{Param_t} bytes as the implementation does.
+\item Some \code{Param_t} members are derived, CLI-only, or internal and are deliberately absent from \code{CtrlParamInit}; inspect the registry before documenting a key as user-settable.
+\end{itemize}
+
+\section{Source index}
+The line-numbered listings in this document are generated directly from the repository files. The primary source files are \srcfile{src/Initialize.cc}, \srcfile{src/Param.cc}, \srcfile{src/Parse.cc}, \srcfile{src/ReadRestart.cc}, \srcfile{src/InputSanity.cc}, \srcfile{include/Param.h}, \srcfile{include/Typedefs.h}, and \srcfile{include/Home.h}; simulation consumers are in \srcfile{src/ParaDiS.cc}, \srcfile{src/ParadisStep.cc}, \srcfile{src/Topology.cc}, \srcfile{src/Remesh.cc}, and \srcfile{src/CrossSlip.cc}.
+\end{document}
