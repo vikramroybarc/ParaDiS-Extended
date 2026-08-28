@@ -684,16 +684,16 @@ SYWindow::SYWindow(int width_hint, int height_hint,
     */
     PixDepth = 0;
     
-    if( XMatchVisualInfo(theDisplay,theScreen,32,TrueColor,&visinfo) ||
-        XMatchVisualInfo(theDisplay,theScreen,32,DirectColor,&visinfo) )
+    if( XMatchVisualInfo(theDisplay,theScreen,24,TrueColor,&visinfo) ||
+        XMatchVisualInfo(theDisplay,theScreen,24,DirectColor,&visinfo) )
     {
-        PixDepth = 32;
-    }else if( XMatchVisualInfo(theDisplay,theScreen,24,TrueColor,&visinfo) ||
-               XMatchVisualInfo(theDisplay,theScreen,24,DirectColor,&visinfo) )
-    {   PixDepth = 24;
+        PixDepth = 24;
+    }else if( XMatchVisualInfo(theDisplay,theScreen,32,TrueColor,&visinfo) ||
+               XMatchVisualInfo(theDisplay,theScreen,32,DirectColor,&visinfo) )
+    {   PixDepth = 32;
     }
     else if( XMatchVisualInfo(theDisplay,theScreen,16,TrueColor,&visinfo) ||
-             XMatchVisualInfo(theDisplay,theScreen,32,DirectColor,&visinfo) )
+             XMatchVisualInfo(theDisplay,theScreen,16,DirectColor,&visinfo) )
     {   PixDepth = 16;
     }
     else if( XMatchVisualInfo(theDisplay,theScreen,8,PseudoColor,&visinfo) ||
