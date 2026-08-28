@@ -29,10 +29,6 @@
 #define MIN(a,b)  ((a)<(b)?(a):(b))
 #define NUMLIMITS_MAX (2*MAX_SEGPART_INTERSECTIONS+1)
 
-//#define M33_INVERSE(a,b) Matrix33_Inverse(a,b)
-//#define M33_INVERSE(a,b) Matrix33_SVD_Inverse(a,b)
-  #define M33_INVERSE(a,b) Matrix33_PseudoInverse(a,b)
-
 /**************************************************************************
  *
  *      Function:     Mobility_BCC_0b_Eshelby
@@ -582,13 +578,10 @@ int Mobility_BCC_0b_Eshelby(Home_t *home, Node_t *node, MobArgs_t *mobArgs)
         }
 
 /*
- *      At this point we should check if the matrix is invertable and
- *      if it isn't, find the eigen values and eigen vectors of the drag
- *      matrix, then invert the drag matrix keeping zero eigen values as zero.
- *
- *      FIX ME!  For now, we're assuming the matrix is invertible.
+ *      The drag matrix is symmetric.  Form its Moore-Penrose
+ *      pseudoinverse so directions with zero drag remain immobile.
  */
-        if ( M33_INVERSE(invDragMatrix, Btotal) < 0 )
+        if (Matrix33_SymmetricPseudoInverse(invDragMatrix, Btotal) < 0)
         { Fatal("%s::%s(%d) : Cannot invert drag matrix!", __FILE__, __func__, __LINE__ ); }
 
         Matrix33Vector3Multiply(invDragMatrix, nForce, nVel);

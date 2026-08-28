@@ -276,6 +276,7 @@
 // int    Matrix33_SVD_Inverse   (real8 a[3][3] , real8 b[3][3] );                                          : A  = SVD Inverse(B)
 //
 // int    Matrix33_PseudoInverse (real8 a[3][3] , real8 b[3][3] );                                          : A  = PseudoInverse(B) (Nicolas Bertin version)
+// int    Matrix33_SymmetricPseudoInverse(real8 a[3][3], real8 b[3][3]);                                    : A  = PseudoInverse(B), B symmetric
 //
 // real8  Matrix33_SVD_Condition (real8 a[3][3] );                                                          : returns SVD condition(A)
 //
@@ -4210,4 +4211,163 @@ int Matrix33_PseudoInverse
     }
 
     return stat;
+}
+
+// Matrix33_SymmetricPseudoInverse()
+//
+// Computes the Moore-Penrose pseudoinverse of a symmetric 3x3 matrix.
+// The drag tensors assembled by the linear mobility laws are symmetric, so
+// diagonalizing them with Jacobi rotations is both more appropriate and more
+// robust than the general SVD path for singular or highly anisotropic input.
+// Eigenvalues at numerical zero are retained as zero in the inverse.
+//---------------------------------------------------------------------------------------------------------
+
+int Matrix33_SymmetricPseudoInverse
+(
+   real8 a[3][3],
+   real8 b[3][3]
+)
+{
+   const int   maxIterations = 64;
+   const real8 jacobiTol     = 16.0 * __DBL_EPSILON__;
+   const real8 rankTol       = 64.0 * __DBL_EPSILON__;
+
+   real8 d[3][3];
+   real8 q[3][3];
+   real8 scale = 0.0;
+
+   /*
+    * Copy the input before touching the output so in-place use is safe.
+    * Symmetrizing here eliminates harmless roundoff differences between
+    * the two stored triangles.
+    */
+   for (int i = 0; i < 3; i++) {
+      if (!isfinite(b[i][i])) {
+         Matrix33_Zero(a);
+         return(-1);
+      }
+
+      d[i][i] = b[i][i];
+      scale = fmax(scale, fabs(d[i][i]));
+   }
+
+   for (int i = 0; i < 3; i++) {
+      for (int j = i + 1; j < 3; j++) {
+         if (!isfinite(b[i][j]) || !isfinite(b[j][i])) {
+            Matrix33_Zero(a);
+            return(-1);
+         }
+
+         d[i][j] = 0.5 * b[i][j] + 0.5 * b[j][i];
+         d[j][i] = d[i][j];
+         scale = fmax(scale, fabs(d[i][j]));
+      }
+   }
+
+   if (scale == 0.0) {
+      Matrix33_Zero(a);
+      return(0);
+   }
+
+   /*
+    * Work with a unit-scale matrix so the Jacobi rotations are not
+    * susceptible to overflow when the drag magnitude is large.
+    */
+   for (int i = 0; i < 3; i++) {
+      for (int j = 0; j < 3; j++) {
+         d[i][j] /= scale;
+      }
+   }
+
+   Matrix33_Identity(q);
+
+   int converged = 0;
+
+   for (int iteration = 0; iteration < maxIterations; iteration++) {
+      int p = 0;
+      int r = 1;
+      real8 maxOffDiag = fabs(d[p][r]);
+
+      if (fabs(d[0][2]) > maxOffDiag) {
+         p = 0;
+         r = 2;
+         maxOffDiag = fabs(d[p][r]);
+      }
+
+      if (fabs(d[1][2]) > maxOffDiag) {
+         p = 1;
+         r = 2;
+         maxOffDiag = fabs(d[p][r]);
+      }
+
+      if (maxOffDiag <= jacobiTol) {
+         converged = 1;
+         break;
+      }
+
+      const real8 app = d[p][p];
+      const real8 aqq = d[r][r];
+      const real8 apq = d[p][r];
+      const real8 tau = (aqq - app) / (2.0 * apq);
+      const real8 t = ((tau >= 0.0) ? 1.0 : -1.0) /
+                      (fabs(tau) + hypot(1.0, tau));
+      const real8 c = 1.0 / sqrt(1.0 + t * t);
+      const real8 s = t * c;
+
+      d[p][p] = app - t * apq;
+      d[r][r] = aqq + t * apq;
+      d[p][r] = 0.0;
+      d[r][p] = 0.0;
+
+      for (int i = 0; i < 3; i++) {
+         if ((i == p) || (i == r)) {
+            continue;
+         }
+
+         const real8 dip = d[i][p];
+         const real8 dir = d[i][r];
+
+         d[i][p] = d[p][i] = c * dip - s * dir;
+         d[i][r] = d[r][i] = s * dip + c * dir;
+      }
+
+      for (int i = 0; i < 3; i++) {
+         const real8 qip = q[i][p];
+         const real8 qir = q[i][r];
+
+         q[i][p] = c * qip - s * qir;
+         q[i][r] = s * qip + c * qir;
+      }
+   }
+
+   if (!converged) {
+      Matrix33_Zero(a);
+      return(-1);
+   }
+
+   real8 maxEigenvalue = 0.0;
+
+   for (int i = 0; i < 3; i++) {
+      maxEigenvalue = fmax(maxEigenvalue, fabs(d[i][i]));
+   }
+
+   const real8 cutoff = rankTol * maxEigenvalue;
+   real8 invEigenvalue[3];
+
+   for (int i = 0; i < 3; i++) {
+      invEigenvalue[i] = (fabs(d[i][i]) > cutoff) ?
+                           1.0 / (scale * d[i][i]) : 0.0;
+   }
+
+   Matrix33_Zero(a);
+
+   for (int i = 0; i < 3; i++) {
+      for (int j = 0; j < 3; j++) {
+         for (int k = 0; k < 3; k++) {
+            a[i][j] += q[i][k] * invEigenvalue[k] * q[j][k];
+         }
+      }
+   }
+
+   return(0);
 }
