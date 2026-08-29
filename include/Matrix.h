@@ -296,6 +296,7 @@ int   Matrix33_SVD_Inverse    (real8 a[3][3] );                                 
 int   Matrix33_SVD_Inverse    (real8 a[3][3] , real8 b[3][3] );                                          // A  = SVD Inverse(B)
 
 int   Matrix33_PseudoInverse  (real8 a[3][3] , real8 b[3][3] );                                          // A  = PseudoInverse(B) (Nicolas Bertin version)
+int   Matrix33_SymmetricPseudoInverse (real8 a[3][3], real8 b[3][3]);                                  // A  = PseudoInverse(B), B symmetric
 
 real8 Matrix33_SVD_Condition  (real8 a[3][3] );                                                          // returns SVD condition
 

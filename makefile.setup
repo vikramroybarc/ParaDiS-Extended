@@ -63,8 +63,8 @@ endif
 #    Set the execution MODE to PARALLEL to enable compile-time support
 #    for MPI and multi-cpu support, or SERIAL for single-cpu compilation
 #
-#MODE=SERIAL
-MODE=PARALLEL
+MODE=SERIAL
+#MODE=PARALLEL
 
 #
 #    Set the XLIB mode to ON to enable compilation supporting the DD3d

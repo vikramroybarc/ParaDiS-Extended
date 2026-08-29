@@ -25,7 +25,7 @@ splitMultiNodeFreq =   5
 #  Simulation time and timestepping controls
 #  
 maxstep =  1000000
-timestepIntegrator =   "trapezoid"
+timestepIntegrator =   "subcycling"
 nextDT = 1.0e-12
 rTol = 0.5
 #
@@ -38,7 +38,7 @@ fmTaylorOrder =   5
 #  Loading conditions
 #  
 loadType =   1 
-eRate =  1.0e5
+eRate =  100
 indxErate =   2
 edotdir = [
     0.0
@@ -56,11 +56,11 @@ shearModulus =   8.600000e+10
 pois =   2.910000e-01  
 burgMag =   2.480000e-10  
 YoungModulus =   2.220520e+11  
-MobScrew =   100 #10   
+MobScrew =   10 #10   
 MobEdge =    100  
 MobClimb =   1.000000e-05
 rc =  2.0
-rann = 5
+#rann = 5
 collisionMethod = 3
 #
 #  I/O controls and parameters
